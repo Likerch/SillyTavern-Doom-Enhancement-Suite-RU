@@ -194,11 +194,11 @@ export const DES_MODULES = Object.freeze({
     state: { path: 'src/core/state.js', exports: { extensionSettings: 'object', lastGeneratedData: 'object', committedTrackerData: 'object' } },
     persistence: { path: 'src/core/persistence.js', exports: { saveSettings: 'function', saveChatData: 'function' } },
     aliases: { path: 'src/systems/features/characterAliases.js', exports: { addCharacterAlias: 'function', applyCharacterAliases: 'function' } },
+    parser: { path: 'src/systems/generation/parser.js', exports: { parseQuests: 'function', parseResponse: 'function' } },
     weather: { path: 'src/systems/ui/weatherEffects.js', exports: { WEATHER_PATTERNS_BY_LANGUAGE: 'object', updateWeatherEffect: 'function', getWeatherKeywordsAsPromptString: 'function' } },
     portraitBar: { path: 'src/systems/ui/portraitBar.js', exports: { updatePortraitBar: 'function', clearPortraitCache: 'function' } },
     thoughts: { path: 'src/systems/rendering/thoughts.js', exports: { updateChatThoughts: 'function' } },
     sceneHeaders: { path: 'src/systems/rendering/sceneHeaders.js', exports: { updateChatSceneHeaders: 'function', resetSceneHeaderCache: 'function' } },
-    parser: { path: 'src/systems/generation/parser.js', exports: { parseQuests: 'function' } },
 });
 
 export const DES_KEYS = Object.freeze({
@@ -258,6 +258,23 @@ export function desForecastField(instruction) {
  */
 export function desTimeField(start = 'TimeStart', end = 'TimeEnd') {
     return `"time": {"start": "${start}", "end": "${end}"}`;
+}
+
+/**
+ * Ключ имени у DES (normalizeName в nameSimilarity.js): нижний регистр, без диакритики (ё → е, й → и),
+ * одиночные пробелы. По нему DES решает, что имя — уже существующая карточка.
+ * @param {unknown} name
+ */
+export function desNameKey(name) {
+    return String(name ?? '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
+}
+
+/**
+ * Поле name персонажа в шаблоне трекера; без аргумента — штатное, с заглушкой CharacterName.
+ * @param {string} [value]
+ */
+export function desCharacterNameField(value = 'CharacterName') {
+    return `"name": "${value}"`;
 }
 
 /**
@@ -615,7 +632,7 @@ export function onDesToggle(callback) {
  * @param {Record<string, any>} namespaces
  */
 function createApi(located, namespaces) {
-    const { state, persistence, weather, portraitBar, thoughts, sceneHeaders, parser } = namespaces;
+    const { state, persistence, aliases, weather, portraitBar, thoughts, sceneHeaders, parser } = namespaces;
     // `extensionSettings`, `lastGeneratedData`, `committedTrackerData` у DES — `export let`, и при загрузке
     // чата он их переприсваивает. Поэтому читаем через пространство имён каждый раз, а не кэшируем.
     const settings = () => state.extensionSettings ?? {};
@@ -695,6 +712,88 @@ function createApi(located, namespaces) {
                 for (const [key, value] of Object.entries(patch)) {
                     if (entry[key] === before[key]) entry[key] = value;
                 }
+            },
+        }),
+
+        names: Object.freeze({
+            /**
+             * Имена персонажей в ответе модели — тем же разбором, который DES сделает следом (parseResponse).
+             * @param {unknown} text
+             * @returns {string[]}
+             */
+            fromReply(text) {
+                let thoughts = null;
+                try {
+                    thoughts = parser.parseResponse(String(text ?? '')).characterThoughts;
+                } catch {
+                    return [];
+                }
+                let data = thoughts;
+                if (typeof thoughts === 'string') {
+                    try {
+                        data = JSON.parse(thoughts);
+                    } catch {
+                        return [];
+                    }
+                }
+                const list = Array.isArray(data) ? data : (Array.isArray(data?.characters) ? data.characters : []);
+                return [...new Set(list.map((entry) => (typeof entry?.name === 'string' ? entry.name.trim() : '')).filter(Boolean))];
+            },
+            /**
+             * Карточки DES: NPC (общие и этого чата) — к ним можно дописывать алиасы; персонажи пользователя — нельзя.
+             * @returns {{ npc: string[], users: string[] }}
+             */
+            cards() {
+                const chatKnown = getContext().chatMetadata?.[DES_KEYS.chatMetadata]?.knownCharacters;
+                const keys = (object) => (object && typeof object === 'object' ? Object.keys(object) : []);
+                return {
+                    npc: [...new Set([...keys(settings().knownCharacters), ...keys(chatKnown)])],
+                    users: keys(settings().userCharacters),
+                };
+            },
+            /** Алиасы DES: { имя карточки: [алиасы] } — копия для чтения. */
+            aliases() {
+                const map = settings().characterAliases;
+                /** @type {Record<string, string[]>} */
+                const copy = {};
+                for (const [canonical, list] of Object.entries(map && typeof map === 'object' ? map : {})) {
+                    if (Array.isArray(list)) copy[canonical] = list.map(String);
+                }
+                return copy;
+            },
+            /**
+             * Дописать алиас штатной функцией DES (сравнение без учёта регистра). Сохранить — `save()`.
+             * @returns {boolean} дописан ли
+             */
+            addAlias(canonical, alias) {
+                try {
+                    return aliases.addCharacterAlias(canonical, alias) === true;
+                } catch (error) {
+                    log.warn(`DES: не удалось дописать алиас «${alias}» к «${canonical}»`, error);
+                    return false;
+                }
+            },
+            /**
+             * Убрать алиас: DES не экспортирует удаление и допускает замену массива целиком (так делает Workshop).
+             * @returns {boolean} был ли такой алиас
+             */
+            removeAlias(canonical, alias) {
+                const map = settings().characterAliases;
+                const list = map?.[canonical];
+                if (!Array.isArray(list)) return false;
+                const lower = String(alias).toLowerCase();
+                const rest = list.filter((entry) => String(entry).toLowerCase() !== lower);
+                if (rest.length === list.length) return false;
+                map[canonical] = rest;
+                return true;
+            },
+            /** Пользователь уже ответил «Нет» в попапе DES «тот же персонаж?» на эту пару. */
+            dismissedByDes(variant, canonical) {
+                return settings().aliasDismissals?.[`${desNameKey(variant)}|${desNameKey(canonical)}`] === true;
+            },
+            /** Сохранить настройки DES (алиасы живут там) его же функцией. */
+            save() {
+                attempt('сохранение настроек', () => persistence.saveSettings());
             },
         }),
 

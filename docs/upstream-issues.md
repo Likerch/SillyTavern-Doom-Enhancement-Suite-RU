@@ -83,3 +83,17 @@
 > Suggested fix: check the longer phrases first.
 
 *В надстройке:* модуль 3 просит модель писать время как ЧЧ:ММ — по цифрам DES час понимает.
+
+## 9. Inflected and case-only variants of a card name create duplicate cards
+
+> In languages with grammatical case the tracker often names a character the way the prose does: Russian «Ани», «Аней» for the card «Аня». `applyCharacterAliases` (`src/systems/features/characterAliases.js:567-618`) handles them inconsistently:
+> - a one-letter difference ("Ани") goes to the Tier 2 popup;
+> - a two-letter difference on a short name ("Аней") is below the `namesAreSimilar` threshold (`src/utils/nameSimilarity.js:62-70`) and silently becomes a new card;
+> - a name equal to a card after `normalizeName` ("мира" for «Мира», "Алена" for «Алёна») is treated as "exactly an existing card" by `resolveStructuralVariant`, is NOT rewritten, and `getCharacterList` then creates a second card with that exact spelling.
+>
+> Suggested fix:
+> 1. In Tier 1, when a name equals a card after `normalizeName`, rewrite it to the card's exact name.
+> 2. Let add-ons plug a language-specific matcher into the similarity check (or emit an event before `applyCharacterAliases`).
+> 3. Export a `removeCharacterAlias(canonical, alias)` next to `addCharacterAlias`.
+
+*В надстройке:* модуль 2 дописывает такие формы алиасами ещё до разбора ответа (режим together).

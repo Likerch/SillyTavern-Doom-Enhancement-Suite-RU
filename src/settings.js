@@ -11,7 +11,8 @@ export const DEFAULT_SETTINGS = {
     debug: false,
     modules: {
         localization: { enabled: true, toasts: true, collect: true, userDictionary: {} },
-        names: { enabled: true },
+        // exceptions: имена, которые не склеивать; journal: склейки { variant, canonical, at }; unmerged: разъединённые пары
+        names: { enabled: true, aliasForms: true, nominativePrompt: true, exceptions: [], journal: [], unmerged: [] },
         // userWeatherWords: свой словарь погоды { тип: [слова] }; null — встроенный
         serviceValues: { enabled: true, weatherWords: true, weatherPrompt: true, timePrompt: true, userWeatherWords: null },
         fixes: { enabled: true, fieldKeys: true, offScene: true, noQuest: true, keepTranslations: true },

@@ -144,8 +144,11 @@ function rewritePrompt() {
     if (!slot?.value) return;
     let text = slot.value;
     const changed = [];
-    if (option('weatherPrompt') && !env.des.weather.customInstruction()) {
-        const result = replaceExact(text, desForecastField(env.des.weather.defaultInstruction()), desForecastField(WEATHER_INSTRUCTION_RU));
+    // Фоновые генерации тоже шлют GENERATION_STARTED, а DES переписывает слот не на каждой: правка уже может стоять.
+    const ourWeather = desForecastField(WEATHER_INSTRUCTION_RU);
+    const ourTime = desTimeField(TIME_PLACEHOLDER_RU, TIME_PLACEHOLDER_RU);
+    if (option('weatherPrompt') && !env.des.weather.customInstruction() && !text.includes(ourWeather)) {
+        const result = replaceExact(text, desForecastField(env.des.weather.defaultInstruction()), ourWeather);
         if (result.replaced) {
             text = result.text;
             changed.push('погода');
@@ -153,8 +156,8 @@ function rewritePrompt() {
             logOnce('prompt:weather', 'warn', 'Служебные значения: в шаблоне трекера нет штатной инструкции погоды DES — оставляю как есть.');
         }
     }
-    if (option('timePrompt')) {
-        const result = replaceExact(text, desTimeField(), desTimeField(TIME_PLACEHOLDER_RU, TIME_PLACEHOLDER_RU));
+    if (option('timePrompt') && !text.includes(ourTime)) {
+        const result = replaceExact(text, desTimeField(), ourTime);
         if (result.replaced) {
             text = result.text;
             changed.push('время');
