@@ -10,7 +10,7 @@ export const DEFAULT_SETTINGS = {
     settingsVersion: 1,
     debug: false,
     modules: {
-        localization: { enabled: true },
+        localization: { enabled: true, toasts: true, collect: true, userDictionary: {} },
         names: { enabled: true },
         serviceValues: { enabled: true },
         fixes: { enabled: true, fieldKeys: true, offScene: true, noQuest: true, keepTranslations: true },

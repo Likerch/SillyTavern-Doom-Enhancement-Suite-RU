@@ -151,6 +151,24 @@
     opacity: 0.75;
 }
 
+.desru-settings .desru-dict-stats,
+.desru-settings .desru-dict-hint {
+    display: block;
+    margin: 4px 0;
+    opacity: 0.8;
+}
+
+.desru-settings .desru-dict-editor {
+    width: 100%;
+    font-family: var(--monoFontFamily, monospace);
+    font-size: 0.85em;
+}
+
+.desru-settings .desru-dict-error {
+    display: block;
+    color: var(--fullred, #e04848);
+}
+
 .desru-settings .desru-log-actions {
     display: flex;
     gap: 6px;

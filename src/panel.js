@@ -1,7 +1,7 @@
 // Панель надстройки в Extensions: статус DES и гарда, переключатели модулей, журнал.
 // Разметка — settings.html, здесь только привязка и отрисовка состояния.
 
-import { ADDON_NAME, getContext } from './st.js';
+import { ADDON_NAME, getContext, notify } from './st.js';
 import { formatEntries, log, stringifyDetails } from './log.js';
 
 const LOG_LINES_SHOWN = 200;
@@ -58,6 +58,18 @@ export async function mountPanel({ modules, settings, onModuleToggle, onModuleOp
         row.append(notes);
         part('modules').append(row);
         moduleRows.set(module.id, row);
+    }
+
+    // Свои разделы модулей (словарь, маппинг погоды, склейки) — модуль рисует их сам.
+    for (const module of modules) {
+        if (!module.section || typeof module.mountSection !== 'function') continue;
+        const section = root.querySelector(`[data-desru-section="${module.section}"]`);
+        if (!section) continue;
+        try {
+            module.mountSection(/** @type {HTMLElement} */ (section));
+        } catch (error) {
+            log.error(`Модуль ${module.number}: не удалось построить раздел панели`, error);
+        }
     }
 
     part('recheck').addEventListener('click', () => onRecheck());
@@ -174,7 +186,7 @@ async function copyLog() {
     const text = formatEntries(log.entries()) || '(журнал пуст)';
     try {
         await navigator.clipboard.writeText(text);
-        toastr.success('Журнал скопирован', 'DES — RU');
+        notify('success', 'Журнал скопирован');
     } catch {
         // Без защищённого контекста clipboard недоступен — копируем через выделение.
         const area = document.createElement('textarea');
@@ -183,7 +195,7 @@ async function copyLog() {
         area.select();
         const copied = document.execCommand('copy');
         area.remove();
-        if (copied) toastr.success('Журнал скопирован', 'DES — RU');
-        else toastr.error('Не удалось скопировать журнал', 'DES — RU');
+        if (copied) notify('success', 'Журнал скопирован');
+        else notify('error', 'Не удалось скопировать журнал');
     }
 }

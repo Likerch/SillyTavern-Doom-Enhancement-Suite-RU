@@ -2,7 +2,7 @@
 // которые разрешены и гардом, и пользователем. Каждый шаг обёрнут: надстройка может
 // деградировать, но не может сломать SillyTavern.
 
-import { ADDON_NAME, getContext, onAppReady } from './st.js';
+import { ADDON_NAME, getContext, notify, onAppReady } from './st.js';
 import { log } from './log.js';
 import { getSettings, saveSettings } from './settings.js';
 import { DES_INFO, checkTemplate, inspectDes, onDesToggle, onTemplateInserted } from './des-adapter.js';
@@ -31,6 +31,8 @@ import fixes from './modules/fixes.js';
  * @property {(env: AddonEnv) => void|Promise<void>} enable
  * @property {() => void|Promise<void>} disable
  * @property {() => { level: 'info'|'warn', text: string }[]} [notes] замечания для панели, пока модуль работает
+ * @property {string} [section] свой раздел панели: `[data-desru-section]` в settings.html
+ * @property {(section: HTMLElement) => void} [mountSection] рисует этот раздел (один раз, при монтировании панели)
  */
 
 /** @type {AddonModule[]} Порядок — как в панели. */
@@ -149,7 +151,7 @@ function reportVerdict(verdict) {
         const consequence = verdict.data
             ? 'Перевод части окон может не работать.'
             : 'Модули 2–4 отключены, перевод работает по мере возможности.';
-        toastr.warning(`DES обновился, нужна проверка селекторов. ${consequence} Подробности — в настройках надстройки.`, 'DES — RU', { timeOut: 10000 });
+        notify('warning', `DES обновился, нужна проверка селекторов. ${consequence} Подробности — в настройках надстройки.`, { timeOut: 10000 });
     }
 }
 

@@ -46,6 +46,146 @@ export const DES_SELECTORS = Object.freeze({
 });
 
 /**
+ * Модуль 1: где живёт интерфейс DES и что в нём — данные (docs/des-recon.md §1).
+ *
+ * Корень — элемент, внутри которого переводим. Режим `full`: всё, кроме зон `exclude` (общих и своих).
+ * Режим `chrome`: только узлы из `chrome` — для мест, где хром тонким слоем лежит поверх данных
+ * (Scene Tracker, пузыри чата, мысли). В `noCollect` переводим по словарю, но не копим непереведённое:
+ * там вперемешку данные. В `userOnly` — подписи пользовательских полей: только словарь пользователя.
+ */
+export const DES_UI = Object.freeze({
+    /** Контейнеры ST, за прямыми детьми которых следим, чтобы заметить появление корней DES (без subtree). */
+    containers: Object.freeze(['body', '#sheld', '#form_sheld', '#send_form', '#extensions_settings2']),
+    /** Лента сообщений: здесь следим с subtree, но разбираем только корни DES из `chatRoots`. */
+    chat: '#chat',
+    /** Блок DES в Extensions — анонимный div; находим его по переключателю. */
+    drawerOf: (toggle) => toggle.closest('.inline-drawer')?.parentElement ?? null,
+
+    roots: Object.freeze([
+        // template.html: модалки, вставляются в <body> один раз
+        { selector: '#rpg-settings-popup', mode: 'full' },
+        { selector: '#rpg-system-log-popup', mode: 'full' },
+        { selector: '#rpg-notification-log-popup', mode: 'full' },
+        { selector: '#rpg-inspector-popup', mode: 'full' },
+        { selector: '#rpg-character-sheet-popup', mode: 'full' },
+        { selector: '#rpg-tracker-editor-popup', mode: 'full' },
+        { selector: '#rpg-prompts-editor-popup', mode: 'full' },
+        { selector: '#rpg-character-data-editor-popup', mode: 'full' },
+        { selector: '#rpg-lorebook-modal', mode: 'full' },
+        { selector: '#character-workshop-popup', mode: 'full' },
+        { selector: '#character-roster-popup', mode: 'full' },
+        // постоянные элементы и временные оверлеи
+        { selector: '#dooms-settings-fab', mode: 'full' },
+        { selector: '.dooms-fab-context-menu', mode: 'full' },
+        { selector: '#dooms-portrait-bar-wrapper', mode: 'full' },
+        { selector: '#dooms-pb-context-menu', mode: 'full' },
+        { selector: '.dooms-alias-overlay', mode: 'full' },
+        { selector: '#dooms-whats-new', mode: 'full' },
+        { selector: '.rpg-emoji-picker', mode: 'full' },
+        { selector: '#rpg-import-mode-dialog', mode: 'full' },
+        { selector: '#dooms-compose-overlay', mode: 'full' },
+        { selector: '.rpg-lb-context-menu', mode: 'full' },
+        { selector: '#cw-version-add-menu', mode: 'full' },
+        { selector: '#dooms-mobile-quick-jump', mode: 'full' },
+        // Scene Tracker: тикер живёт в #sheld, остальное — в ленте
+        { selector: '.dooms-info-ticker-wrapper', mode: 'chrome' },
+    ]),
+
+    /** Корни внутри #chat. Сообщения пользователя и модели — данные: здесь только хром DES. */
+    chatRoots: Object.freeze([
+        { selector: '.dooms-scene-header', mode: 'chrome' },
+        { selector: '.dooms-info-banner', mode: 'chrome' },
+        { selector: '.dooms-info-hud', mode: 'chrome' },
+        { selector: '.dooms-dc-inline', mode: 'chrome' },
+        { selector: '.dooms-dc-trap-badge', mode: 'full' },
+        { selector: 'details.dooms-tracker-json', mode: 'chrome' },
+        { selector: 'details.dooms-inline-thought', mode: 'chrome' },
+        { selector: '.dooms-bubbles', mode: 'chrome' },
+        { selector: '.dooms-import-fullsheet-btn', mode: 'full' },
+        { selector: '.dooms-reasoning-tts', mode: 'full' },
+    ]),
+
+    /** Хром внутри корней режима `chrome`. */
+    chrome: Object.freeze([
+        // Scene Tracker во всех раскладках: подписи полей, заголовок HUD, отладочный бейдж Doom Counter
+        '.dooms-scene-label', '.dooms-ip-label', '.dooms-ip-hud-label', '.dooms-ip-panel-label',
+        '.dooms-ip-hud-title', '.dooms-ip-ticker-expand', '.dooms-dc-debug-badge', '.dooms-dc-debug-pending',
+        // Doom Counter: заголовок, кнопки, подсказки (карточки твистов — данные)
+        '.dooms-dc-inline-header', '.dooms-dc-loading-label', '.dooms-dc-actions', '.dooms-dc-chosen-hint',
+        // Tracker Data под сообщением
+        '.dooms-tracker-json-label', '.dooms-tracker-json-edit', '.dooms-tracker-json-editor-actions',
+        // мысли в сообщении
+        '.dooms-thought-name', '.dooms-thought-tts',
+        // пузыри чата: «Narrator» / «Unknown» и роль — хром, имя говорящего и текст — данные
+        '.dooms-bubble-narrator .dooms-bubble-author', '.dooms-bubble-unknown .dooms-bubble-author',
+        '.dooms-card-narrator .dooms-card-author', '.dooms-card-unknown .dooms-card-author',
+        '.dooms-card-role', '.dooms-bubble-tts',
+    ]),
+
+    /** Данные: не переводим и не собираем (действует во всех корнях). */
+    exclude: Object.freeze([
+        'input', 'textarea', 'pre', 'script', 'style', '[contenteditable="true"]', '.rpg-editable',
+        // Present Characters
+        '.dooms-portrait-card-name', '.dooms-portrait-card-emoji', '.dooms-pb-back-name', '.dooms-pb-back-value', '.dooms-pb-back-emoji',
+        // мысли и пузыри (на случай, если хром-узел окажется внутри)
+        '.dooms-inline-thought-content', '.dooms-bubble-text', '.dooms-card-text',
+        // Doom Counter: карточки твистов и ножей
+        '.dooms-dc-card-title', '.dooms-dc-card-desc', '.dooms-dc-card-emoji', '.dooms-dc-chosen-title', '.dooms-dc-chosen-emoji',
+        // Workshop
+        '#cw-char-title', '#cw-preview-name', '#cw-preview-rel', '.cw-alias-tag', '.rpg-rel-chip', '.rpg-dc-knife-text', '.rpg-cs-expr-label',
+        '#cw-inj-lorebook-list li:not(.cw-combobox-none):not(.cw-combobox-empty)',
+        // лист персонажа: DES читает эти узлы обратно для «Copy Sheet»
+        '.rpg-cs-hero-name', '.rpg-cs-title', '.rpg-cs-section-title', '.rpg-cs-section-body', '.rpg-cs-section-emoji',
+        '.rpg-cs-timeline-status', '.rpg-cs-thought-text',
+        // Lore Library
+        '.rpg-lb-tree-book-name', '.rpg-lb-breadcrumb-part', '.rpg-lb-entry-row-pos',
+        // журналы, инспектор, What's New, ростер, версии
+        '.rpg-log-entry', '.rpg-notif-text', '.rpg-notif-time', '.dooms-wn-item-title', '.dooms-wn-item-body', '.dooms-wn-version',
+        '.cr-tile-name', '#rpg-preset-entity-name', '#dooms-version-display', '.dooms-github-star-count',
+    ]),
+
+    /** Переводим по словарю, но не копим непереведённое: здесь вперемешку данные. */
+    noCollect: Object.freeze([
+        '.dooms-pb-back-label', '#rpg-ws-relationship-preview', '#rpg-fab-menu-toggles', '.dooms-fab-menu-item',
+        '#rpg-connection-profile', '#rpg-update-branch', '#rpg-preset-select', '#cw-linked-persona', '#rpg-update-status',
+        '#rpg-current-version', '#rpg-external-api-test-result', '#rpg-theme-badge',
+        '.cw-campaign-badge-text', '.cw-version-label', '.rpg-lb-campaign-name', '.rpg-lb-panel-title', '.rpg-lb-editor-title',
+        '.rpg-lb-mobile-back', '.rpg-lb-tab', '.rpg-lb-entry-row-title', '.rpg-lb-context-menu-item', '.rpg-lb-move-menu',
+        '.rpg-inspector-body', '.dooms-alias-card',
+    ]),
+
+    /** Подписи пользовательских полей: переводятся только словарём пользователя. */
+    userOnly: Object.freeze([
+        '#rpg-st-custom-fields .rpg-setting-label',
+        'label[for^="rpg-history-scenefield-"]', 'label[for^="rpg-history-charfield-"]', 'label[for="rpg-history-thoughts"]',
+    ]),
+    /** Строка Scene Tracker с пользовательским полем: у неё значок `.dooms-cf-icon` вместо иконки Font Awesome. */
+    customFieldMarker: '.dooms-cf-icon',
+
+    /** Атрибуты, которые переводим, и элементы, где в этих атрибутах лежат данные (имена, названия). */
+    attributes: Object.freeze(['title', 'placeholder', 'aria-label']),
+    dataAttributes: Object.freeze(['.dooms-portrait-card', '.dooms-ip-ticker-char-dot', '.dooms-ip-panel-char-dot', '.dooms-ip-hud-char-dot', '.dooms-ip-char-dot', '.rpg-color-swatch']),
+
+    /** Уведомления toastr (контейнер создаёт ST при первом тосте) и попапы ST, в которых DES показывает свой текст. */
+    toastContainer: '#toast-container',
+    toastParts: Object.freeze(['.toast-title', '.toast-message']),
+    stPopup: 'dialog.popup',
+    stPopupContent: '.popup-content',
+
+    /**
+     * Правки вёрстки DES под более длинные русские подписи: подключаются, пока включена локализация,
+     * и снимаются вместе с ней. Только то, что нельзя решить коротким переводом. `media` — необязательно.
+     */
+    layoutFixes: Object.freeze([
+        // Редактор промптов: ряд «Вернуть встроенный · Глубина · Роль» без переноса (flex в инлайн-стиле);
+        // на телефоне русские подписи выталкивают «Роль» за край экрана.
+        Object.freeze({ selector: '.rpg-prompt-injection-controls', style: 'flex-wrap: wrap;' }),
+        // Редактор трекера: «Сброс · Экспорт · Импорт» на телефоне не влезают в ряд и ломаются на две строки.
+        Object.freeze({ media: '(max-width: 480px)', selector: '.rpg-editor-footer-row > .rpg-btn-secondary', style: 'padding-left: 0.75em; padding-right: 0.75em;' }),
+    ]),
+});
+
+/**
  * ES-модули DES, которые нужны модулям 2–4, и экспорты, без которых они не работают.
  * Все они статически импортируются в index.js DES, поэтому к нашему импорту уже загружены:
  * мы получаем те же экземпляры и не запускаем код DES повторно.

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isDesManifest, isLiveDesState } from '../src/des-adapter.js';
+import { DES_UI, isDesManifest, isLiveDesState } from '../src/des-adapter.js';
 
 test('isDesManifest recognises DES by homePage or display name', () => {
     assert.equal(isDesManifest({ display_name: 'Whatever', homePage: 'https://github.com/DangerDaza/Dooms-Enhancement-Suite' }), true);
@@ -29,4 +29,13 @@ test('isLiveDesState rejects an unrelated copy of the module', () => {
 test('isLiveDesState cannot decide without saved settings', () => {
     assert.equal(isLiveDesState({ enabled: true }, undefined), null);
     assert.equal(isLiveDesState({ enabled: true }, { enabled: true }), null);
+});
+
+test('layout fixes are plain selector + declarations, nothing that escapes the rule', () => {
+    assert.ok(DES_UI.layoutFixes.length > 0);
+    for (const fix of DES_UI.layoutFixes) {
+        assert.match(fix.selector, /^[.#\w][\w\s.#>:()[\]="'-]*$/, fix.selector);
+        assert.match(fix.style, /^[\w\s:;%().,-]+;$/, fix.style);
+        if (fix.media !== undefined) assert.match(fix.media, /^\([\w\s:.-]+\)$/, fix.media);
+    }
 });

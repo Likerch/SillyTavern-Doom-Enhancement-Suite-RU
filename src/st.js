@@ -23,6 +23,20 @@ export function importSt(path) {
     return import(new URL(path, ST_SCRIPTS_ROOT).href);
 }
 
+/** Класс наших уведомлений: локализация их пропускает — это не строки DES. */
+export const OWN_TOAST_CLASS = 'desru-toast';
+
+/**
+ * Уведомление надстройки (toastr ST) с нашим заголовком и классом.
+ * @param {'success'|'info'|'warning'|'error'} kind
+ * @param {string} message
+ * @param {Record<string, unknown>} [options] опции toastr
+ */
+export function notify(kind, message, options = {}) {
+    const toastClass = `${toastr.options?.toastClass ?? 'toast'} ${OWN_TOAST_CLASS}`;
+    toastr[kind](message, 'DES — RU', { ...options, toastClass });
+}
+
 /**
  * Вызывает `callback` один раз, когда ST сообщит о готовности приложения.
  * APP_READY у ST «липкий»: подписка после события срабатывает сразу.
