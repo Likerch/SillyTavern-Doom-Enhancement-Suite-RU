@@ -29,7 +29,7 @@
 1. Сначала поставьте сам DES, если его ещё нет: Extensions → Install Extension → `https://github.com/DangerDaza/Dooms-Enhancement-Suite`.
 2. Extensions → Install Extension → URL этой надстройки:
    ```
-   https://github.com/Likerch/SillyTavern-Dooms-Enhancement-Suite-RU
+   https://github.com/Likerch/SillyTavern-Doom-Enhancement-Suite-RU
    ```
 3. Перезагрузите страницу. Надстройка грузится после DES (порядок загрузки 110 против 100 у DES), так ей и нужно.
 

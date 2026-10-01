@@ -5,7 +5,7 @@ import { DES_UI, isDesManifest, isLiveDesState } from '../src/des-adapter.js';
 test('isDesManifest recognises DES by homePage or display name', () => {
     assert.equal(isDesManifest({ display_name: 'Whatever', homePage: 'https://github.com/DangerDaza/Dooms-Enhancement-Suite' }), true);
     assert.equal(isDesManifest({ display_name: "Doom's Enhancement Suite" }), true);
-    assert.equal(isDesManifest({ display_name: 'SillyTavern - Doom\'s Enhancement Suite - RU', homePage: 'https://github.com/Likerch/SillyTavern-Dooms-Enhancement-Suite-RU' }), false);
+    assert.equal(isDesManifest({ display_name: 'SillyTavern - Doom\'s Enhancement Suite - RU', homePage: 'https://github.com/Likerch/SillyTavern-Doom-Enhancement-Suite-RU' }), false);
     assert.equal(isDesManifest(null), false);
 });
 
