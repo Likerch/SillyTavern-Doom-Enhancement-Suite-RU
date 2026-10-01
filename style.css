@@ -83,6 +83,38 @@
     opacity: 0.75;
 }
 
+.desru-settings .desru-module-options {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 4px 0 0 22px;
+}
+
+.desru-settings .desru-option {
+    margin: 0;
+}
+
+.desru-settings .desru-option-desc {
+    margin: 0 0 4px 22px;
+    opacity: 0.65;
+}
+
+.desru-settings .desru-module-notes {
+    grid-column: 1 / -1;
+    margin: 4px 0 0;
+    padding-left: 18px;
+    font-size: 0.9em;
+}
+
+.desru-settings .desru-note-info {
+    opacity: 0.8;
+}
+
+.desru-settings .desru-note-warn {
+    color: var(--warning, #e8a33d);
+}
+
 .desru-settings .desru-tone-on {
     color: var(--active, #4caf50);
 }

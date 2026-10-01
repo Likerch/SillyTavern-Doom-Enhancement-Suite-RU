@@ -26,8 +26,11 @@ import fixes from './modules/fixes.js';
  * @property {string} description
  * @property {{ ui: boolean, data: boolean }} needs что модуль требует от гарда
  * @property {boolean} [stub] логика ещё не реализована
+ * @property {{ key: string, title: string, description: string }[]} [options] переключатели внутри модуля
+ *           (settings.modules[id][key]); модуль читает их на лету, перезапуск не нужен
  * @property {(env: AddonEnv) => void|Promise<void>} enable
  * @property {() => void|Promise<void>} disable
+ * @property {() => { level: 'info'|'warn', text: string }[]} [notes] замечания для панели, пока модуль работает
  */
 
 /** @type {AddonModule[]} Порядок — как в панели. */
@@ -68,8 +71,10 @@ export async function start() {
             modules: MODULES,
             settings,
             onModuleToggle,
+            onModuleOptionToggle,
             onDebugToggle,
             onRecheck: () => recheck(RECHECK_TIMEOUT_MS),
+            onOpen: () => render(),
         });
     } catch (error) {
         log.error('Не удалось показать панель настроек', error);
@@ -197,6 +202,21 @@ function onModuleToggle(id, enabled) {
     syncModules();
 }
 
+/**
+ * @param {string} id
+ * @param {string} key
+ * @param {boolean} enabled
+ */
+function onModuleOptionToggle(id, key, enabled) {
+    const settings = getSettings();
+    settings.modules[id][key] = enabled;
+    saveSettings();
+    const module = MODULES.find((candidate) => candidate.id === id);
+    const title = module?.options?.find((option) => option.key === key)?.title ?? key;
+    log.info(`${module ? `Модуль ${module.number}` : id}: «${title}» ${enabled ? 'включено' : 'выключено'}`);
+    render();
+}
+
 /** @param {boolean} enabled */
 function onDebugToggle(enabled) {
     const settings = getSettings();
@@ -220,6 +240,20 @@ function describeModule(module) {
     return { text: 'запускается…', tone: 'wait' };
 }
 
+/**
+ * @param {AddonModule} module
+ * @returns {{ level: 'info'|'warn', text: string }[]}
+ */
+function moduleNotes(module) {
+    if (!state.running.has(module.id) || typeof module.notes !== 'function') return [];
+    try {
+        return module.notes();
+    } catch (error) {
+        log.warn(`Модуль ${module.number}: не удалось собрать замечания`, error);
+        return [];
+    }
+}
+
 function render() {
     if (!panel) return;
     try {
@@ -227,7 +261,7 @@ function render() {
             checking: state.checking,
             facts: state.facts,
             verdict: state.verdict,
-            modules: MODULES.map((module) => ({ id: module.id, status: describeModule(module) })),
+            modules: MODULES.map((module) => ({ id: module.id, status: describeModule(module), notes: moduleNotes(module) })),
             version: getAddonVersion(),
             verifiedCommit: DES_INFO.verifiedCommit,
             verifiedVersions: DES_INFO.verifiedVersions,

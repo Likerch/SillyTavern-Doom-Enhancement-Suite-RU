@@ -58,6 +58,7 @@ export const DES_MODULES = Object.freeze({
     portraitBar: { path: 'src/systems/ui/portraitBar.js', exports: { updatePortraitBar: 'function', clearPortraitCache: 'function' } },
     thoughts: { path: 'src/systems/rendering/thoughts.js', exports: { updateChatThoughts: 'function' } },
     sceneHeaders: { path: 'src/systems/rendering/sceneHeaders.js', exports: { updateChatSceneHeaders: 'function', resetSceneHeaderCache: 'function' } },
+    parser: { path: 'src/systems/generation/parser.js', exports: { parseQuests: 'function' } },
 });
 
 export const DES_KEYS = Object.freeze({
@@ -67,7 +68,58 @@ export const DES_KEYS = Object.freeze({
     swipeData: 'dooms_tracker_swipes',
     /** Событие eventSource после отдельного запроса трекера (режимы separate/external). */
     updateCompleteEvent: 'dooms_tracker_update_complete',
+    /** Режим, в котором трекер пишется в основном ответе модели и проходит через extension-промпт. */
+    togetherMode: 'together',
 });
+
+/** Слоты extension-промптов ST, которые пишет DES. */
+export const DES_SLOTS = Object.freeze({
+    /** Инструкция и JSON-шаблон трекера (режим together); DES переписывает его на каждом GENERATION_STARTED. */
+    trackerInstructions: 'dooms-tracker-inject',
+});
+
+/** Служебные значения, которые DES сравнивает как строки. */
+export const DES_VALUES = Object.freeze({
+    /** «Квеста нет» — так DES прячет строку квеста (sceneHeaders.js, quests.js, promptBuilder.js). */
+    noQuest: 'None',
+    /** Фраза, которую понимает английский детектор «персонаж не в сцене» (portraitBar.js, thoughts.js, sceneHeaders.js). */
+    offSceneMarker: '(off-scene)',
+});
+
+/** Тайминги DES, от которых зависят наши обработчики. */
+export const DES_TIMING = Object.freeze({
+    /**
+     * По скольку сообщений за кадр (requestAnimationFrame) DES стирает `extra.display_text`
+     * в своей очистке на CHAT_CHANGED (onChatChangedTtsCleanup в index.js).
+     */
+    displayTextCleanupChunk: 50,
+});
+
+/**
+ * Ключ JSON, который DES строит из названия поля персонажа: только латиница и цифры в snake_case.
+ * Для кириллицы получается пустая строка — отсюда пустые ключи `""` в промпте (jsonPromptHelpers.js).
+ * @param {string} name
+ */
+export function desDetailKey(name) {
+    return String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+/**
+ * Ключ пользовательского поля сцены у DES: то же, но без пояснения в скобках в конце названия.
+ * Пустой ключ — DES молча выкидывает поле и из промпта, и из Scene Tracker.
+ * @param {string} name
+ */
+export function desSceneFieldKey(name) {
+    return desDetailKey(String(name ?? '').replace(/\s*\(.*\)\s*$/, '').trim());
+}
+
+/**
+ * Уже есть пометка, которую распознаёт английский детектор DES?
+ * @param {string} text
+ */
+export function hasDesOffSceneMarker(text) {
+    return /\boff[\s-]?scene\b/i.test(String(text ?? ''));
+}
 
 /**
  * @typedef {object} DesFacts
@@ -320,18 +372,112 @@ export function onDesToggle(callback) {
  * @typedef {ReturnType<typeof createApi>} DesApi
  */
 
+/** @typedef {{ quests: string|null, infoBox: string|null, characterThoughts: string|null }} TrackerStrings */
+
 /**
- * Доступ к живому DES для модулей 2–4. Модули не знают ни путей, ни селекторов DES:
+ * Доступ к живому DES для модулей 2–4. Модули не знают ни путей, ни селекторов, ни форматов DES:
  * всё, что им нужно, они получают отсюда.
  * @param {{ name: string, manifest: any }} located
  * @param {Record<string, any>} namespaces
  */
 function createApi(located, namespaces) {
+    const { state, persistence, portraitBar, thoughts, sceneHeaders, parser } = namespaces;
+    // `extensionSettings`, `lastGeneratedData`, `committedTrackerData` у DES — `export let`, и при загрузке
+    // чата он их переприсваивает. Поэтому читаем через пространство имён каждый раз, а не кэшируем.
+    const settings = () => state.extensionSettings ?? {};
+    const asString = (value) => (typeof value === 'string' ? value : null);
+
+    /** @param {string} label @param {() => void} action */
+    const attempt = (label, action) => {
+        try {
+            action();
+        } catch (error) {
+            log.warn(`DES: не удалось выполнить ${label}`, error);
+        }
+    };
+
     return Object.freeze({
         name: located.name,
         version: located.manifest?.version ?? null,
         keys: DES_KEYS,
-        /** Живые пространства имён модулей DES (только для чтения привязок; объекты можно мутировать). */
+        values: DES_VALUES,
+        /** Живые пространства имён модулей DES (привязки только для чтения, объекты можно мутировать). */
         modules: Object.freeze({ ...namespaces }),
+
+        /** @returns {string} режим генерации трекера: together / separate / external */
+        generationMode: () => String(settings().generationMode ?? DES_KEYS.togetherMode),
+        /** Включённые поля персонажа — тем же фильтром, что DES использует при сборке промпта. */
+        characterFields: () => (settings().trackerConfig?.presentCharacters?.customFields ?? [])
+            .filter((field) => field && field.enabled && field.name),
+        /** Включённые пользовательские поля сцены. */
+        sceneFields: () => (settings().trackerConfig?.infoBox?.customFields ?? [])
+            .filter((field) => field && field.enabled && field.name),
+
+        /** Слот ST с инструкцией трекера (живой объект из extension_prompts) или `null`. */
+        trackerInstructionSlot() {
+            const slot = getContext().extensionPrompts?.[DES_SLOTS.trackerInstructions];
+            return slot && typeof slot.value === 'string' ? slot : null;
+        },
+
+        tracker: Object.freeze({
+            /** @returns {TrackerStrings} то, что DES сейчас показывает (JSON-строки) */
+            read() {
+                const data = state.lastGeneratedData ?? {};
+                return {
+                    quests: asString(data.quests),
+                    infoBox: asString(data.infoBox),
+                    characterThoughts: asString(data.characterThoughts),
+                };
+            },
+            /**
+             * Сообщение, к которому DES привязывает свежие данные трекера: последнее, если это ответ модели.
+             * @returns {number|null}
+             */
+            lastAssistantIndex() {
+                const chat = getContext().chat;
+                const index = Array.isArray(chat) ? chat.length - 1 : -1;
+                return index >= 0 && !chat[index]?.is_user ? index : null;
+            },
+            /**
+             * Записывает исправленные JSON-строки в живой стейт DES. С `messageIndex` — ещё и в swipe-данные
+             * этого сообщения, но только в поля, которые совпадают с тем, что DES только что разобрал:
+             * так мы никогда не перезапишем чужие или устаревшие данные.
+             * @param {Partial<TrackerStrings>} patch
+             * @param {{ messageIndex?: number|null }} [options]
+             */
+            write(patch, { messageIndex = null } = {}) {
+                const live = state.lastGeneratedData;
+                const committed = state.committedTrackerData;
+                if (!live || typeof live !== 'object') return;
+                const before = { ...live };
+                for (const [key, value] of Object.entries(patch)) {
+                    live[key] = value;
+                    if (committed && committed[key] === before[key]) committed[key] = value;
+                }
+                if (messageIndex === null) return;
+                const message = getContext().chat?.[messageIndex];
+                const entry = message?.extra?.[DES_KEYS.swipeData]?.[message.swipe_id ?? 0];
+                if (!entry) return;
+                for (const [key, value] of Object.entries(patch)) {
+                    if (entry[key] === before[key]) entry[key] = value;
+                }
+            },
+        }),
+
+        /** Отдаёт квесты парсеру DES: он сам обновит своё зеркало квестов и сохранит настройки. */
+        parseQuests(questsText) {
+            attempt('разбор квестов', () => parser.parseQuests(questsText));
+        },
+        /** Сохраняет стейт чата DES (и сам чат) так же, как это делает DES. */
+        saveChat() {
+            attempt('сохранение чата', () => persistence.saveChatData());
+        },
+        /** Перерисовывает всё, что DES строит из данных трекера. */
+        rerender() {
+            attempt('сброс кэша шапки сцены', () => sceneHeaders.resetSceneHeaderCache());
+            attempt('перерисовку шапки сцены', () => sceneHeaders.updateChatSceneHeaders());
+            attempt('перерисовку Present Characters', () => portraitBar.updatePortraitBar());
+            attempt('перерисовку мыслей', () => thoughts.updateChatThoughts());
+        },
     });
 }

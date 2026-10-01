@@ -13,7 +13,7 @@ export const DEFAULT_SETTINGS = {
         localization: { enabled: true },
         names: { enabled: true },
         serviceValues: { enabled: true },
-        fixes: { enabled: true },
+        fixes: { enabled: true, fieldKeys: true, offScene: true, noQuest: true, keepTranslations: true },
     },
 };
 
