@@ -61,4 +61,25 @@
 
 > `src/systems/ui/weatherEffects.js:130`: the `wind` group contains the single literal `"шквал,буря"` instead of two entries, `"шквал"` and `"буря"`. As a result «шквал» on its own never matches.
 
-*В надстройке:* модуль 3 дополнит словарь погоды DES в памяти.
+*В надстройке:* модуль 3 дописывает «шквал» в словарь погоды DES в памяти.
+
+## 7. Weather matching: substrings, English first, a cache that never resets
+
+> `parseWeatherType` (`src/systems/ui/weatherEffects.js:199-220`) lowercases the forecast, walks all `en` groups before `ru`, takes the first group whose pattern is a plain substring (`text.includes(pattern)`), and memoizes the result in `weatherTypeCache` (`:17`), which is cleared only after 200 entries (`:217`). In non-English roleplay this shows up as:
+> - inflected forms never match: «дождливо», «метели», «ливни», «ясный» → no effect;
+> - substring false positives: «безоблачно» (cloudless) contains «облачно» → no effect; «угроза» (threat) contains «гроза» → storm;
+> - a mixed forecast such as "Cloudy, дождь" resolves by the English `cloud` → no effect;
+> - the tracker prompt always lists the English keywords (`src/systems/generation/jsonPromptHelpers.js:195`, `getWeatherKeywordsAsPromptString('en')`), so a model writing in another language improvises;
+> - patterns added to `WEATHER_PATTERNS_BY_LANGUAGE` at runtime (by an add-on or a future settings UI) do not apply to forecasts that were already parsed, because the cache is never reset.
+>
+> Suggested fix: match patterns at word starts (for example `new RegExp('(?<!\\p{L})' + pattern, 'u')`), so stems like «дожд» work and «угроза» no longer matches «гроза»; pick the earliest match across languages instead of strictly `en` first; list keywords in the prompt for the language the user plays in; clear `weatherTypeCache` when the patterns change, or export a function that does.
+
+*В надстройке:* модуль 3 дописывает основы и формы, причём до первого разбора, и просит модель писать одно русское слово из списка. Ложные срабатывания самого DES («угроза» → гроза) снаружи не исправить.
+
+## 8. Unreachable time words
+
+> `parseHourFromTime` (`src/systems/ui/weatherEffects.js:23-59`) checks `night` (`:37`) before `midnight` (`:38`) and `late night` (`:39`). Both contain "night", so midnight is read as 22:00 and "late night" as 22:00 instead of 0 and 2.
+>
+> Suggested fix: check the longer phrases first.
+
+*В надстройке:* модуль 3 просит модель писать время как ЧЧ:ММ — по цифрам DES час понимает.

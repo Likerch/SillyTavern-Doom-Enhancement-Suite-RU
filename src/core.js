@@ -28,8 +28,12 @@ import fixes from './modules/fixes.js';
  * @property {boolean} [stub] логика ещё не реализована
  * @property {{ key: string, title: string, description: string }[]} [options] переключатели внутри модуля
  *           (settings.modules[id][key]); модуль читает их на лету, перезапуск не нужен
+ * @property {() => void|Promise<void>} [preload] ранний шаг при загрузке надстройки, до APP_READY и гарда:
+ *           для того, что должно успеть раньше первых вычислений DES. Сам проверяет, что DES на месте;
+ *           если гард потом модуль не пустит, ядро вызовет disable
  * @property {(env: AddonEnv) => void|Promise<void>} enable
  * @property {() => void|Promise<void>} disable
+ * @property {(key: string, enabled: boolean) => void} [onOptionChange] переключатель внутри работающего модуля
  * @property {() => { level: 'info'|'warn', text: string }[]} [notes] замечания для панели, пока модуль работает
  * @property {string} [section] свой раздел панели: `[data-desru-section]` в settings.html
  * @property {(section: HTMLElement) => void} [mountSection] рисует этот раздел (один раз, при монтировании панели)
@@ -53,6 +57,8 @@ const state = {
     templateMissing: [],
     /** @type {Set<string>} */
     running: new Set(),
+    /** @type {Set<string>} модули, сделавшие ранний шаг, но ещё не включённые */
+    preloaded: new Set(),
     warnedDesUpdated: false,
     lastVerdictKey: '',
 };
@@ -63,7 +69,10 @@ let syncQueue = Promise.resolve();
 let recheckTimer = 0;
 
 export async function start() {
+    // Скрипт надстройки грузится раньше, чем ST откроет последний чат: ранние шаги успевают до DES.
+    const preloading = preloadModules();
     await new Promise((resolve) => onAppReady(resolve));
+    await preloading;
     const settings = getSettings();
     log.setDebug(settings.debug);
     log.info(`Запуск надстройки ${getAddonVersion()}`);
@@ -96,6 +105,25 @@ export async function start() {
         clearTimeout(recheckTimer);
         recheckTimer = setTimeout(() => recheck(RECHECK_TIMEOUT_MS), 1500);
     });
+}
+
+async function preloadModules() {
+    let settings;
+    try {
+        settings = getSettings();
+    } catch (error) {
+        log.error('Настройки надстройки недоступны при загрузке', error);
+        return;
+    }
+    for (const module of MODULES) {
+        if (typeof module.preload !== 'function' || settings.modules[module.id]?.enabled === false) continue;
+        try {
+            await module.preload();
+            state.preloaded.add(module.id);
+        } catch (error) {
+            log.warn(`Модуль ${module.number} (${module.title}): ранний шаг не удался`, error);
+        }
+    }
 }
 
 function getAddonVersion() {
@@ -175,16 +203,18 @@ function syncModules() {
                 try {
                     await module.enable({ des: state.des, verdict: /** @type {import('./guard.js').GuardVerdict} */ (state.verdict), settings });
                     state.running.add(module.id);
+                    state.preloaded.delete(module.id);
                 } catch (error) {
                     log.error(`Модуль ${module.number} (${module.title}) не запустился`, error);
                 }
-            } else if (!shouldRun && isRunning) {
+            } else if (!shouldRun && (isRunning || state.preloaded.has(module.id))) {
                 try {
                     await module.disable();
                 } catch (error) {
                     log.error(`Модуль ${module.number} (${module.title}) не остановился чисто`, error);
                 } finally {
                     state.running.delete(module.id);
+                    state.preloaded.delete(module.id);
                 }
             }
         }
@@ -216,6 +246,13 @@ function onModuleOptionToggle(id, key, enabled) {
     const module = MODULES.find((candidate) => candidate.id === id);
     const title = module?.options?.find((option) => option.key === key)?.title ?? key;
     log.info(`${module ? `Модуль ${module.number}` : id}: «${title}» ${enabled ? 'включено' : 'выключено'}`);
+    if (module && state.running.has(id) && typeof module.onOptionChange === 'function') {
+        try {
+            module.onOptionChange(key, enabled);
+        } catch (error) {
+            log.error(`Модуль ${module.number}: не удалось применить «${title}»`, error);
+        }
+    }
     render();
 }
 

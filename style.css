@@ -169,6 +169,23 @@
     color: var(--fullred, #e04848);
 }
 
+.desru-settings .desru-weather-grid {
+    display: grid;
+    gap: 4px;
+    margin: 6px 0;
+}
+
+.desru-settings .desru-weather-row {
+    display: grid;
+    grid-template-columns: 6.5em minmax(0, 1fr);
+    align-items: center;
+    gap: 6px;
+}
+
+.desru-settings .desru-weather-row > input {
+    margin: 0;
+}
+
 .desru-settings .desru-log-actions {
     display: flex;
     gap: 6px;

@@ -17,6 +17,7 @@ import { log } from '../log.js';
 import { getSettings, saveSettings } from '../settings.js';
 import { DES_SELECTORS, DES_UI } from '../des-adapter.js';
 import { createDictionary, looksTranslatable, normalizeText, renderTemplate } from '../lib/dictionary.js';
+import { menuButton } from '../ui.js';
 
 const DICTIONARY_URL = new URL('../../locales/ru.json', import.meta.url);
 const ROOT_SELECTOR = DES_UI.roots.map((root) => root.selector).join(', ');
@@ -687,23 +688,6 @@ function mountSection(section) {
     };
     changeListeners.add(render);
     render();
-}
-
-/**
- * @param {string} icon
- * @param {string} label
- * @param {() => void} onClick
- */
-function menuButton(icon, label, onClick) {
-    const button = document.createElement('div');
-    button.className = 'menu_button menu_button_icon';
-    const glyph = document.createElement('i');
-    glyph.className = `fa-solid ${icon}`;
-    const text = document.createElement('span');
-    text.textContent = label;
-    button.append(glyph, text);
-    button.addEventListener('click', onClick);
-    return button;
 }
 
 // ─── Модуль ────────────────────────────────────────────────────────────────

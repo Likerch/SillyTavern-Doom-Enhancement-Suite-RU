@@ -12,7 +12,8 @@ export const DEFAULT_SETTINGS = {
     modules: {
         localization: { enabled: true, toasts: true, collect: true, userDictionary: {} },
         names: { enabled: true },
-        serviceValues: { enabled: true },
+        // userWeatherWords: свой словарь погоды { тип: [слова] }; null — встроенный
+        serviceValues: { enabled: true, weatherWords: true, weatherPrompt: true, timePrompt: true, userWeatherWords: null },
         fixes: { enabled: true, fieldKeys: true, offScene: true, noQuest: true, keepTranslations: true },
     },
 };

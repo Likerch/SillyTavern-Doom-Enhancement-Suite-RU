@@ -194,7 +194,7 @@ export const DES_MODULES = Object.freeze({
     state: { path: 'src/core/state.js', exports: { extensionSettings: 'object', lastGeneratedData: 'object', committedTrackerData: 'object' } },
     persistence: { path: 'src/core/persistence.js', exports: { saveSettings: 'function', saveChatData: 'function' } },
     aliases: { path: 'src/systems/features/characterAliases.js', exports: { addCharacterAlias: 'function', applyCharacterAliases: 'function' } },
-    weather: { path: 'src/systems/ui/weatherEffects.js', exports: { WEATHER_PATTERNS_BY_LANGUAGE: 'object', updateWeatherEffect: 'function' } },
+    weather: { path: 'src/systems/ui/weatherEffects.js', exports: { WEATHER_PATTERNS_BY_LANGUAGE: 'object', updateWeatherEffect: 'function', getWeatherKeywordsAsPromptString: 'function' } },
     portraitBar: { path: 'src/systems/ui/portraitBar.js', exports: { updatePortraitBar: 'function', clearPortraitCache: 'function' } },
     thoughts: { path: 'src/systems/rendering/thoughts.js', exports: { updateChatThoughts: 'function' } },
     sceneHeaders: { path: 'src/systems/rendering/sceneHeaders.js', exports: { updateChatSceneHeaders: 'function', resetSceneHeaderCache: 'function' } },
@@ -225,6 +225,84 @@ export const DES_VALUES = Object.freeze({
     /** Фраза, которую понимает английский детектор «персонаж не в сцене» (portraitBar.js, thoughts.js, sceneHeaders.js). */
     offSceneMarker: '(off-scene)',
 });
+
+/**
+ * Погода DES (weatherEffects.js). Разбор прогноза: текст в нижний регистр, языки таблицы по порядку
+ * (сначала все группы `en`, потом `ru`), побеждает первая группа, где прогноз содержит одно из слов.
+ * Ничего не совпало — `none`, эффекта нет. Результат DES кэширует по тексту прогноза навсегда
+ * (сброс — только после 200 разных текстов), поэтому свои слова надо дописать до первого разбора.
+ */
+export const DES_WEATHER = Object.freeze({
+    /** Язык таблицы, в группы которого модуль 3 дописывает русские слова. */
+    language: 'ru',
+    /** Типы эффектов в порядке проверки. `none` — последняя группа: дописывать в неё бессмысленно. */
+    types: Object.freeze(['blizzard', 'storm', 'wind', 'snow', 'rain', 'mist', 'sunny', 'none']),
+    /** Начало штатной инструкции погоды; дальше DES дописывает getWeatherKeywordsAsPromptString(language). */
+    instructionPrefix: 'SINGLE keyword only. ',
+    /** Язык, на котором DES перечисляет погоду в промпте (захардкожен в jsonPromptHelpers.js). */
+    promptLanguage: 'en',
+});
+
+/**
+ * Поле forecast в шаблоне трекера с данной инструкцией — ровно как его пишет DES (jsonPromptHelpers.js).
+ * @param {string} instruction
+ */
+export function desForecastField(instruction) {
+    return `"forecast": "${instruction}"`;
+}
+
+/**
+ * Поле time в шаблоне трекера; без аргументов — штатное, с заглушками TimeStart и TimeEnd.
+ * @param {string} [start]
+ * @param {string} [end]
+ */
+export function desTimeField(start = 'TimeStart', end = 'TimeEnd') {
+    return `"time": {"start": "${start}", "end": "${end}"}`;
+}
+
+/**
+ * Какой эффект DES выберет для прогноза — то же, что его parseWeatherType, но без кэша.
+ * @param {unknown} text прогноз
+ * @param {Record<string, { id: string, patterns: string[] }[]>} table WEATHER_PATTERNS_BY_LANGUAGE
+ * @returns {string} тип эффекта, `none` — без эффекта
+ */
+export function desWeatherTypeOf(text, table) {
+    if (!text) return 'none';
+    const lower = String(text).toLowerCase();
+    for (const groups of Object.values(table ?? {})) {
+        for (const group of Array.isArray(groups) ? groups : []) {
+            if (Array.isArray(group?.patterns) && group.patterns.some((pattern) => lower.includes(pattern))) return group.id;
+        }
+    }
+    return 'none';
+}
+
+/**
+ * Час, который DES вычитает из времени трекера (parseHourFromTime): английские слова вроде «evening»,
+ * «3 PM» или «15:00». По часу он решает, день или ночь; `null` — DES не понял и рисует дневное небо.
+ * @param {unknown} time
+ * @returns {number|null}
+ */
+export function desHourOf(time) {
+    if (!time) return null;
+    const text = String(time).toLowerCase().trim();
+    const words = [['dawn', 6], ['sunrise', 6], ['early morning', 7], ['morning', 9], ['midday', 12], ['noon', 12], ['mid-day', 12],
+        ['afternoon', 14], ['late afternoon', 16], ['evening', 19], ['dusk', 19], ['sunset', 19], ['twilight', 20],
+        ['night', 22], ['nighttime', 22], ['midnight', 0], ['late night', 2]];
+    for (const [word, hour] of words) {
+        if (text.includes(String(word))) return Number(hour);
+    }
+    const ampm = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+    if (ampm) {
+        let hour = parseInt(ampm[1], 10);
+        const pm = ampm[3].toLowerCase() === 'pm';
+        if (pm && hour !== 12) hour += 12;
+        if (!pm && hour === 12) hour = 0;
+        return hour;
+    }
+    const clock = text.match(/(\d{1,2}):(\d{2})/);
+    return clock ? parseInt(clock[1], 10) : null;
+}
 
 /** Тайминги DES, от которых зависят наши обработчики. */
 export const DES_TIMING = Object.freeze({
@@ -418,6 +496,22 @@ async function importDesModules(scriptUrl) {
 }
 
 /**
+ * Ранний импорт одного модуля DES — до APP_READY и до полной проверки, которую делает inspectDes.
+ * Нужен модулю, который должен успеть раньше первых вычислений DES (кэш погоды). Экземпляр тот же,
+ * что у DES: адрес считается от его скрипта. Проверяются только экспорты; версию проверит гард.
+ * @param {keyof typeof DES_MODULES} key
+ * @returns {Promise<any|null>} пространство имён или `null`, если DES не загружен или экспорты не те
+ */
+export async function importDesModuleEarly(key) {
+    const spec = DES_MODULES[key];
+    const located = await locateDes();
+    if (!spec || !located?.scriptUrl || located.stDisabled) return null;
+    const namespace = await import(new URL(spec.path, located.scriptUrl).href);
+    const complete = Object.entries(spec.exports).every(([name, type]) => typeof namespace[name] === type && namespace[name] !== null);
+    return complete ? namespace : null;
+}
+
+/**
  * Собирает факты о DES: найден ли, включён ли, на месте ли жадные узлы DOM и нужные экспорты.
  * Ничего не меняет ни в DES, ни в ST.
  * @param {{ timeoutMs?: number }} [options] сколько ждать инициализации DES
@@ -521,7 +615,7 @@ export function onDesToggle(callback) {
  * @param {Record<string, any>} namespaces
  */
 function createApi(located, namespaces) {
-    const { state, persistence, portraitBar, thoughts, sceneHeaders, parser } = namespaces;
+    const { state, persistence, weather, portraitBar, thoughts, sceneHeaders, parser } = namespaces;
     // `extensionSettings`, `lastGeneratedData`, `committedTrackerData` у DES — `export let`, и при загрузке
     // чата он их переприсваивает. Поэтому читаем через пространство имён каждый раз, а не кэшируем.
     const settings = () => state.extensionSettings ?? {};
@@ -601,6 +695,41 @@ function createApi(located, namespaces) {
                 for (const [key, value] of Object.entries(patch)) {
                     if (entry[key] === before[key]) entry[key] = value;
                 }
+            },
+        }),
+
+        weather: Object.freeze({
+            /** Живая таблица слов погоды DES: он читает её при каждом разборе, её можно дополнять. */
+            table: () => weather.WEATHER_PATTERNS_BY_LANGUAGE,
+            /** Пересчитать эффект погоды по текущему трекеру (сам DES делает это только на своих событиях). */
+            refresh() {
+                attempt('обновление эффекта погоды', () => weather.updateWeatherEffect());
+            },
+            /** Штатная инструкция поля forecast — ровно то, что DES вставит в шаблон, если своей нет. */
+            defaultInstruction: () => DES_WEATHER.instructionPrefix + weather.getWeatherKeywordsAsPromptString(DES_WEATHER.promptLanguage),
+            /** Своя инструкция погоды из редактора промптов DES; пустая строка — штатная. */
+            customInstruction: () => String(settings().customWeatherPrompt ?? ''),
+            /** Включены ли эффекты погоды («Динамическая погода»). */
+            effectsEnabled: () => settings().enableDynamicWeather === true,
+            /** Есть ли поле погоды в шаблоне трекера, то есть пишет ли её модель. */
+            inPrompt: () => settings().trackerConfig?.infoBox?.widgets?.weather?.enabled === true,
+            /**
+             * Погода и время текущего трекера — те поля, из которых DES строит эффекты.
+             * @returns {{ forecast: string|null, time: string|null }}
+             */
+            current() {
+                const raw = state.lastGeneratedData?.infoBox || state.committedTrackerData?.infoBox || null;
+                let data = raw;
+                if (typeof raw === 'string') {
+                    try {
+                        data = JSON.parse(raw);
+                    } catch {
+                        data = null;
+                    }
+                }
+                const forecast = data?.weather?.forecast || data?.weather?.emoji;
+                const time = data?.time?.end || data?.time?.start;
+                return { forecast: typeof forecast === 'string' ? forecast : null, time: typeof time === 'string' ? time : null };
             },
         }),
 

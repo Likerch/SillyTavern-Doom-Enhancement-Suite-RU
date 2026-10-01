@@ -3,6 +3,7 @@
 
 import { ADDON_NAME, getContext, notify } from './st.js';
 import { formatEntries, log, stringifyDetails } from './log.js';
+import { copyText } from './ui.js';
 
 const LOG_LINES_SHOWN = 200;
 
@@ -183,19 +184,7 @@ function formatLine(entry) {
 }
 
 async function copyLog() {
-    const text = formatEntries(log.entries()) || '(журнал пуст)';
-    try {
-        await navigator.clipboard.writeText(text);
-        notify('success', 'Журнал скопирован');
-    } catch {
-        // Без защищённого контекста clipboard недоступен — копируем через выделение.
-        const area = document.createElement('textarea');
-        area.value = text;
-        document.body.append(area);
-        area.select();
-        const copied = document.execCommand('copy');
-        area.remove();
-        if (copied) notify('success', 'Журнал скопирован');
-        else notify('error', 'Не удалось скопировать журнал');
-    }
+    const copied = await copyText(formatEntries(log.entries()) || '(журнал пуст)');
+    if (copied) notify('success', 'Журнал скопирован');
+    else notify('error', 'Не удалось скопировать журнал');
 }
