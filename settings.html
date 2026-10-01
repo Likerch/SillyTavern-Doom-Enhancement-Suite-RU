@@ -1,0 +1,61 @@
+<div id="desru-settings" class="desru-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>SillyTavern - Doom's Enhancement Suite - RU</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <p class="desru-intro">Надстройка над Doom's Enhancement Suite: русский интерфейс и исправления трекера для русского ролеплея. Файлы DES не меняются.</p>
+
+            <div class="desru-status">
+                <div class="desru-status-line">
+                    <span class="desru-badge desru-tone-wait" data-desru="badge">проверяю…</span>
+                    <span class="desru-summary" data-desru="summary"></span>
+                </div>
+                <small class="desru-des-name" data-desru="des-name"></small>
+                <ul class="desru-problems" data-desru="problems" hidden></ul>
+                <ul class="desru-notes" data-desru="notes" hidden></ul>
+                <div class="menu_button menu_button_icon desru-recheck" data-desru="recheck" title="Заново найти DES и проверить селекторы и экспорты">
+                    <i class="fa-solid fa-rotate"></i>
+                    <span>Перепроверить DES</span>
+                </div>
+            </div>
+
+            <h4 class="desru-heading">Модули</h4>
+            <div class="desru-modules" data-desru="modules"></div>
+
+            <details class="desru-section">
+                <summary>Словарь интерфейса</summary>
+                <small>Редактор словаря и выгрузка непереведённых строк появятся вместе с модулем 1.</small>
+            </details>
+            <details class="desru-section">
+                <summary>Погода и служебные значения</summary>
+                <small>Редактор маппинга погоды появится вместе с модулем 3.</small>
+            </details>
+            <details class="desru-section">
+                <summary>Склейки имён</summary>
+                <small>Список склеек, исключения и кнопка «разъединить» появятся вместе с модулем 2.</small>
+            </details>
+            <details class="desru-section" data-desru="log-section">
+                <summary>Журнал и отладка</summary>
+                <label class="checkbox_label">
+                    <input type="checkbox" data-desru="debug">
+                    <span>Режим отладки: подробный журнал в консоли</span>
+                </label>
+                <div class="desru-log-actions">
+                    <div class="menu_button menu_button_icon" data-desru="copy-log">
+                        <i class="fa-solid fa-copy"></i>
+                        <span>Скопировать</span>
+                    </div>
+                    <div class="menu_button menu_button_icon" data-desru="clear-log">
+                        <i class="fa-solid fa-trash-can"></i>
+                        <span>Очистить</span>
+                    </div>
+                </div>
+                <pre class="desru-log" data-desru="log"></pre>
+            </details>
+
+            <small class="desru-footer" data-desru="footer"></small>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,149 @@
+/* Панель надстройки. Всё под .desru-settings, чтобы не задевать ST и DES. */
+
+.desru-settings .desru-intro {
+    margin: 0 0 8px;
+    opacity: 0.85;
+}
+
+.desru-settings .desru-status {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+}
+
+.desru-settings .desru-status-line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.desru-settings .desru-badge {
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 0.85em;
+    white-space: nowrap;
+    border: 1px solid currentColor;
+}
+
+.desru-settings .desru-des-name {
+    opacity: 0.7;
+}
+
+.desru-settings .desru-problems,
+.desru-settings .desru-notes {
+    margin: 2px 0;
+    padding-left: 18px;
+    font-size: 0.9em;
+}
+
+.desru-settings .desru-problems {
+    color: var(--warning, #e8a33d);
+}
+
+.desru-settings .desru-notes {
+    opacity: 0.8;
+}
+
+.desru-settings .desru-recheck {
+    align-self: flex-start;
+}
+
+.desru-settings .desru-heading {
+    margin: 12px 0 4px;
+}
+
+.desru-settings .desru-modules {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.desru-settings .desru-module {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: baseline;
+    column-gap: 8px;
+}
+
+.desru-settings .desru-module .checkbox_label {
+    margin: 0;
+}
+
+.desru-settings .desru-module-state {
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+
+.desru-settings .desru-module-desc {
+    grid-column: 1 / -1;
+    opacity: 0.75;
+}
+
+.desru-settings .desru-tone-on {
+    color: var(--active, #4caf50);
+}
+
+.desru-settings .desru-tone-off {
+    opacity: 0.6;
+}
+
+.desru-settings .desru-tone-wait {
+    opacity: 0.8;
+}
+
+.desru-settings .desru-tone-warn,
+.desru-settings .desru-tone-blocked {
+    color: var(--warning, #e8a33d);
+}
+
+.desru-settings .desru-tone-error {
+    color: var(--fullred, #e04848);
+}
+
+.desru-settings .desru-section {
+    margin-top: 8px;
+}
+
+.desru-settings .desru-section > summary {
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.desru-settings .desru-section > small {
+    display: block;
+    margin: 4px 0;
+    opacity: 0.75;
+}
+
+.desru-settings .desru-log-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.desru-settings .desru-log {
+    max-height: 240px;
+    margin: 6px 0 0;
+    padding: 6px;
+    overflow: auto;
+    font-size: 0.8em;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 4px;
+}
+
+.desru-settings .desru-log:empty::before {
+    content: 'Записей нет.';
+    opacity: 0.6;
+}
+
+.desru-settings .desru-footer {
+    display: block;
+    margin-top: 10px;
+    opacity: 0.6;
+}

@@ -1,0 +1,13 @@
+{
+    "display_name": "SillyTavern - Doom's Enhancement Suite - RU",
+    "loading_order": 110,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Likerchik",
+    "version": "0.1.0",
+    "homePage": "https://github.com/Likerch/SillyTavern-Dooms-Enhancement-Suite-RU",
+    "minimum_client_version": "1.19.0",
+    "auto_update": true
+}

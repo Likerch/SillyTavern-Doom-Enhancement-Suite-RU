@@ -1,0 +1,12 @@
+# Read-only upstream checkout of Doom's Enhancement Suite, used for recon only.
+# Never commit it and never edit it: we are an add-on, not a fork.
+vendor/
+
+node_modules/
+.claude/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
