@@ -5,11 +5,20 @@ import { checkDictionary } from '../tools/check-dictionary.mjs';
 import { createDictionary } from '../src/lib/dictionary.js';
 
 const file = new URL('../locales/ru.json', import.meta.url);
+const ckFile = new URL('../locales/ru.carrotkernel.json', import.meta.url);
 
 test('locales/ru.json is valid: no duplicates, placeholders and tags line up', () => {
     const { errors, stats } = checkDictionary(file);
     assert.deepEqual(errors, []);
     assert.ok(stats.entries > 500, `entries: ${stats.entries}`);
+});
+
+test('locales/ru.carrotkernel.json is valid too', () => {
+    const { errors, stats } = checkDictionary(ckFile);
+    assert.deepEqual(errors, []);
+    assert.ok(stats.entries > 500, `entries: ${stats.entries}`);
+    const dictionary = createDictionary(JSON.parse(fs.readFileSync(ckFile, 'utf8')));
+    assert.equal(dictionary.text('Character Repository'), 'Архив персонажей');
 });
 
 test('the built-in dictionary translates the core DES chrome', () => {

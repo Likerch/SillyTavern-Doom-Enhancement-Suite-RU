@@ -17,9 +17,11 @@ import carrotKernel from './modules/carrot-kernel.js';
 
 /**
  * @typedef {object} AddonEnv то, что получает модуль при включении
- * @property {import('./des-adapter.js').DesApi|null} des доступ к живому DES (только если гард пропустил данные)
+ * @property {import('./des-adapter.js').DesApi|null} des доступ к живому DES — только пока гард разрешает работу
+ *           с его данными; читается на лету, поэтому после перепроверки DES всегда свежий
  * @property {import('./guard.js').GuardVerdict} verdict
  * @property {ReturnType<typeof getSettings>} settings
+ * @property {() => void} refresh перерисовать панель: состояние модуля изменилось само (например, нашёлся CK)
  *
  * @typedef {object} AddonModule
  * @property {string} id ключ в settings.modules
@@ -63,6 +65,8 @@ const state = {
     running: new Set(),
     /** @type {Set<string>} модули, сделавшие ранний шаг, но ещё не включённые */
     preloaded: new Set(),
+    /** @type {Set<string>} модули, чей enable упал: не перезапускаем, пока пользователь не переключит или DES не перепроверят */
+    failed: new Set(),
     warnedDesUpdated: false,
     lastVerdictKey: '',
 };
@@ -71,6 +75,8 @@ const state = {
 let panel = null;
 let syncQueue = Promise.resolve();
 let recheckTimer = 0;
+/** Номер последней перепроверки: результат более ранней, если она закончилась позже, не применяем. */
+let recheckRun = 0;
 
 export async function start() {
     // Скрипт надстройки грузится раньше, чем ST откроет последний чат: ранние шаги успевают до DES.
@@ -96,19 +102,21 @@ export async function start() {
     }
     render();
 
-    await recheck(DES_INIT_TIMEOUT_MS);
-
+    // Подписки — до первой проверки: она может ждать DES до 30 секунд, а переключение DES за это время не должно потеряться.
     // Окна DES ленивые: их селекторы можно проверить только когда DES вставит template.html.
     onTemplateInserted(() => {
         state.templateMissing = checkTemplate();
         if (!state.templateMissing.length) log.info('Окна DES на месте: селекторы шаблона совпали.');
-        applyVerdict();
+        // Идёт проверка — её итог учтёт и шаблон.
+        if (!state.checking) applyVerdict();
     });
     // Переключатель самого DES работает без перезагрузки — перепроверяем после него.
     onDesToggle(() => {
         clearTimeout(recheckTimer);
         recheckTimer = setTimeout(() => recheck(RECHECK_TIMEOUT_MS), 1500);
     });
+
+    await recheck(DES_INIT_TIMEOUT_MS);
 }
 
 async function preloadModules() {
@@ -140,20 +148,24 @@ function getAddonVersion() {
 
 /** @param {number} timeoutMs сколько ждать инициализации DES */
 async function recheck(timeoutMs) {
+    const run = ++recheckRun;
     state.checking = true;
+    // DES мог измениться — модулям, которые не запустились, даём ещё попытку.
+    state.failed.clear();
     render();
+    /** @type {Awaited<ReturnType<typeof inspectDes>>|null} */
+    let result = null;
     try {
-        const { facts, api } = await inspectDes({ timeoutMs });
-        state.facts = facts;
-        state.des = api;
-        state.templateMissing = checkTemplate();
+        result = await inspectDes({ timeoutMs });
     } catch (error) {
-        log.error('Проверка DES завершилась ошибкой', error);
-        state.facts = null;
-        state.des = null;
-    } finally {
-        state.checking = false;
+        if (run === recheckRun) log.error('Проверка DES завершилась ошибкой', error);
     }
+    // Пока ждали, началась новая проверка — решает её итог.
+    if (run !== recheckRun) return;
+    state.facts = result?.facts ?? null;
+    state.des = result?.api ?? null;
+    if (result) state.templateMissing = checkTemplate();
+    state.checking = false;
     applyVerdict();
 }
 
@@ -196,6 +208,25 @@ function isAllowed(module, verdict) {
     return (!module.needs.ui || verdict.ui) && (!module.needs.data || verdict.data);
 }
 
+/**
+ * Окружение модуля. DES отдаётся, только пока гард разрешает работу с его данными: модули 5 и 6 работают и при
+ * изменившемся или выключенном DES, но трогать его тогда не должны.
+ * @param {ReturnType<typeof getSettings>} settings
+ * @returns {AddonEnv}
+ */
+function moduleEnv(settings) {
+    return {
+        get des() {
+            return state.verdict?.data ? state.des : null;
+        },
+        get verdict() {
+            return /** @type {import('./guard.js').GuardVerdict} */ (state.verdict);
+        },
+        settings,
+        refresh: () => render(),
+    };
+}
+
 /** Включает и выключает модули по настройкам и гарду. Вызовы выстраиваются в очередь. */
 function syncModules() {
     syncQueue = syncQueue.then(async () => {
@@ -203,13 +234,21 @@ function syncModules() {
         for (const module of MODULES) {
             const shouldRun = settings.modules[module.id]?.enabled !== false && isAllowed(module, state.verdict);
             const isRunning = state.running.has(module.id);
-            if (shouldRun && !isRunning) {
+            if (shouldRun && !isRunning && !state.failed.has(module.id)) {
                 try {
-                    await module.enable({ des: state.des, verdict: /** @type {import('./guard.js').GuardVerdict} */ (state.verdict), settings });
+                    await module.enable(moduleEnv(settings));
                     state.running.add(module.id);
                     state.preloaded.delete(module.id);
                 } catch (error) {
                     log.error(`Модуль ${module.number} (${module.title}) не запустился`, error);
+                    state.failed.add(module.id);
+                    state.preloaded.delete(module.id);
+                    // Убрать то, что модуль успел подключить до сбоя, — иначе его уже не выключить.
+                    try {
+                        await module.disable();
+                    } catch (cleanupError) {
+                        log.warn(`Модуль ${module.number}: не удалось убрать то, что он успел подключить`, cleanupError);
+                    }
                 }
             } else if (!shouldRun && (isRunning || state.preloaded.has(module.id))) {
                 try {
@@ -235,6 +274,8 @@ function onModuleToggle(id, enabled) {
     const settings = getSettings();
     settings.modules[id].enabled = enabled;
     saveSettings();
+    // Переключили вручную — значит, можно снова попробовать запустить модуль, который не запустился.
+    state.failed.delete(id);
     syncModules();
 }
 
@@ -285,8 +326,9 @@ function describeModule(module) {
         }
         return custom ?? { text: module.stub ? 'включён (пока заглушка)' : 'работает', tone: 'on' };
     }
+    if (state.failed.has(module.id)) return { text: 'не запустился — подробности в журнале', tone: 'blocked' };
     if (state.checking && !state.verdict) return { text: 'ждёт проверки DES', tone: 'wait' };
-    if (!state.verdict?.ui) return { text: 'не работает: DES недоступен', tone: 'blocked' };
+    if (module.needs.ui && !state.verdict?.ui) return { text: 'не работает: DES недоступен', tone: 'blocked' };
     if (module.needs.data && !state.verdict.data) return { text: 'остановлен гардом', tone: 'blocked' };
     return { text: 'запускается…', tone: 'wait' };
 }

@@ -8,16 +8,18 @@
  * первым, поэтому дальше он сам подставит имя карточки: без дубля и без попапа. Формы имени персонажа
  * пользователя алиасом стать не могут (DES запрещает) — их прячем из «Present Characters».
  * В режимах separate/external точки до разбора нет — там склейка не работает (решение §12.1 разведки),
- * но регистр и ё (алиас-написание к каждой карточке), раскраска реплик и листы работают во всех режимах.
+ * но регистр и ё (там — алиас-написание к каждой карточке), раскраска реплик и листы работают во всех режимах.
  *
  * Каждая склейка пишется в журнал; «разъединить» убирает алиас и запоминает пару, чтобы не склеить снова.
  * Прошлые ответы уже записаны под именем карточки — разделяются только следующие.
+ * Алиасы DES общие для всех чатов, а карточки и скрытые имена у каждого чата свои: скрытие в журнале
+ * помнит свой чат и сверяется только в нём.
  */
 import { getContext, notify } from '../st.js';
 import { log } from '../log.js';
 import { getSettings, saveSettings } from '../settings.js';
-import { DES_KEYS, DES_SELECTORS, desCharacterNameField, desNameKey } from '../des-adapter.js';
-import { buildNameContext, pairKey } from '../name-context.js';
+import { DES_KEYS, DES_MODE_NAMES, DES_SELECTORS, desCharacterNameField, desNameKey } from '../des-adapter.js';
+import { buildNameContext, hiddenNames, pairKey } from '../name-context.js';
 import { decideName, decideSheetOwner, findCaseDuplicates, normalizeRussianName, wordForms } from '../lib/russian-names.js';
 import { NAME_INSTRUCTION_RU, replaceExact } from '../lib/service-prompt.js';
 import { bestAdjacentSpeaker, messageFontColors, namePattern } from '../lib/speaker-colors.js';
@@ -25,7 +27,6 @@ import { menuButton } from '../ui.js';
 
 /** Сколько склеек держим в журнале. */
 const JOURNAL_LIMIT = 200;
-const MODE_NAMES = Object.freeze({ together: 'Вместе с ответом', separate: 'Отдельным запросом', external: 'Внешний API' });
 /** Как часто проверять, закрыт ли Workshop, пока он мог затереть наши алиасы. */
 const WORKSHOP_POLL_MS = 2000;
 /** Сколько ждать, пока в попапе импорта листа DES подтвердят имя. */
@@ -57,7 +58,7 @@ const OPTIONS = [
     {
         key: 'caseAliases',
         title: 'Регистр и ё в любом режиме',
-        description: 'К каждой карточке дописывается алиас-написание в нижнем регистре и без «ё» — так «аня» и «Алена» склеиваются с «Аня» и «Алёна» и в режимах «Отдельным запросом» и «Внешний API».',
+        description: 'В режимах «Отдельным запросом» и «Внешний API» к каждой карточке дописывается алиас-написание в нижнем регистре и без «ё» — так «аня» и «Алена» склеиваются с «Аня» и «Алёна». В режиме «Вместе с ответом» это делает склейка форм.',
     },
     {
         key: 'nominativePrompt',
@@ -88,8 +89,12 @@ const changeListeners = new Set();
 let workshopGuard = [];
 let workshopTimer = 0;
 let sheetTimer = 0;
+let chatLoadedTimer = 0;
 /** @type {((event: Event) => void)|null} */
 let importClickHandler = null;
+/** Мысли персонажей DES на момент последней раскраски (или загрузки чата): по ним видно, пришли ли новые. */
+/** @type {string|null|undefined} */
+let harvestedThoughts;
 const counters = { caseAliases: 0, colors: 0, sheets: 0, restored: 0 };
 
 function moduleSettings() {
@@ -130,13 +135,44 @@ function asArray(list) {
 /** @param {string[]} list @param {string} name */
 const includesName = (list, name) => list.some((item) => String(item).toLowerCase() === String(name).toLowerCase());
 
+/** Открытый чат — так его различает и DES (getContext().chatId); `null` — чата нет. */
+function currentChatId() {
+    const id = getContext().chatId;
+    return id === undefined || id === null || id === '' ? null : String(id);
+}
+
+/**
+ * Где сделана запись журнала: `this` — в открытом чате, `other` — в другом, `unknown` — старая запись без чата.
+ * @param {{ chatId?: string }} entry
+ * @returns {'this'|'other'|'unknown'}
+ */
+function entryChat(entry) {
+    if (!entry.chatId) return 'unknown';
+    return entry.chatId === currentChatId() ? 'this' : 'other';
+}
+
+/**
+ * Ключ записи журнала: алиас DES один на все чаты, а скрытие — своё в каждом чате.
+ * @param {{ variant: string, canonical: string, kind?: string, chatId?: string }} entry
+ */
+function journalKey(entry) {
+    return entry.kind === 'hide' ? `hide|${pairKey(entry)}|${entry.chatId ?? ''}` : pairKey(entry);
+}
+
+/** Ключ алиаса-написания: точное написание, без свёртки ё — «алёна» и «алена» разные. @param {{ variant: string, canonical: string }} pair */
+const spellingKey = (pair) => `${pair.variant}|${pair.canonical}`;
+
 // ─── Склейка ───────────────────────────────────────────────────────────────
 
 /** @param {string} variant @param {string} canonical @param {'alias'|'hide'} kind @param {string} via */
 function recordMerge(variant, canonical, kind, via) {
     const settings = moduleSettings();
-    const journal = asArray(settings.journal).filter((entry) => pairKey(entry) !== pairKey({ variant, canonical }));
-    journal.push({ variant, canonical, kind, via, at: Date.now() });
+    /** @type {{ variant: string, canonical: string, kind: string, via: string, at: number, chatId?: string }} */
+    const entry = { variant, canonical, kind, via, at: Date.now() };
+    const chatId = currentChatId();
+    if (chatId) entry.chatId = chatId;
+    const journal = asArray(settings.journal).filter((item) => journalKey(item) !== journalKey(entry));
+    journal.push(entry);
     settings.journal = journal.slice(-JOURNAL_LIMIT);
 }
 
@@ -171,10 +207,9 @@ function applyDecision(name, decision) {
 /** Ответ модели пришёл (together): до разбора DES дописываем формы имён алиасами. */
 function onReplyReceived() {
     if (!isTogetherMode() || !option('aliasForms')) return;
-    const chat = getContext().chat;
     // DES берёт для трекера последнее сообщение — смотрим туда же.
-    const message = Array.isArray(chat) ? chat[chat.length - 1] : null;
-    if (!message || message.is_user || typeof message.mes !== 'string') return;
+    const message = lastReply();
+    if (!message) return;
     const names = env.des.names.fromReply(message.mes);
     if (!names.length) return;
     const context = buildNameContext(env.des);
@@ -184,6 +219,16 @@ function onReplyReceived() {
         const decision = decideName(name, context);
         if (decision.action === 'skip') {
             if (decision.candidates) log.debug(`Имена: «${name}» подходит нескольким карточкам (${decision.candidates.join(', ')}) — не склеиваю.`);
+            continue;
+        }
+        // Два имени в одном ответе трекера — два персонажа: «Саша» не склеится с «Александром», если он тоже тут
+        // (сам или уже известным DES алиасом).
+        const target = decision.action === 'alias' ? decision.canonical : decision.persona;
+        const targetAliases = asArray(context.aliasesOf?.get(target));
+        const twin = names.find((other) => other !== name
+            && (desNameKey(other) === desNameKey(target) || includesName(targetAliases, other)));
+        if (twin !== undefined) {
+            log.debug(`Имена: «${name}» и «${twin}» — разные персонажи одного ответа, не склеиваю.`);
             continue;
         }
         if (!applyDecision(name, decision)) continue;
@@ -217,48 +262,90 @@ function rewriteNamePlaceholder() {
 
 /**
  * Алиасы-написания к каждой карточке: в нижнем регистре и без «ё». DES сравнивает алиасы без учёта
- * регистра, а карточки — точно, поэтому «аня» иначе становится второй карточкой. Работает во всех режимах.
- * Алиас, который пользователь сам убрал в Workshop, не возвращаем.
+ * регистра, а карточки — точно, поэтому «аня» иначе становится второй карточкой. Только в режимах
+ * «Отдельным запросом» и «Внешний API»: в режиме «Вместе с ответом» регистр и ё склеивает decideName, а лишний
+ * алиас вредит — алиасы DES общие для всех чатов, и в другом чате с такой же карточкой он уведёт имя к этой.
+ * Алиас, который пользователь сам убрал в Workshop, не возвращаем; написание, занятое другой карточкой, не берём.
  */
 function ensureCaseAliases() {
     if (!env?.des || !option('caseAliases') || env.des.workshopOpen()) return;
+    if (isTogetherMode() && option('aliasForms')) return;
     const des = env.des;
     const { npc, users } = des.names.cards();
     const aliases = des.names.aliases();
     const keys = new Map();
     for (const card of [...npc, ...users]) keys.set(desNameKey(card), [...(keys.get(desNameKey(card)) ?? []), card]);
+    // Чьё это написание у DES: алиас карточки или имя карточки с алиасами (может быть из другого чата).
+    /** @type {Map<string, Set<string>>} */
+    const owners = new Map();
+    const own = (spelling, card) => owners.set(spelling, (owners.get(spelling) ?? new Set()).add(card));
+    for (const [card, list] of Object.entries(aliases)) {
+        own(card.trim().toLowerCase(), card);
+        for (const alias of list) own(alias.trim().toLowerCase(), card);
+    }
     const settings = moduleSettings();
     const added = asArray(settings.caseAliasesAdded);
-    const known = new Set(added.map(pairKey));
+    const known = new Set(added.map(spellingKey));
+    const removedByUser = asArray(settings.caseAliasesRemoved);
+    const refused = new Set(removedByUser.map(spellingKey));
     const unmerged = new Set(asArray(settings.unmerged).map(pairKey));
     // Падежный дубль из прошлых ответов («Аней» при «Аня») алиасами не укрепляем.
     const duplicates = new Set(findCaseDuplicates(npc).map((pair) => pair.variant));
+    // Скрытые из «Present Characters» — не NPC: так DES хранит и скрытые формы имени игрока.
+    const hidden = hiddenNames(des);
     let changed = false;
     for (const card of npc) {
         // Две карточки с одним ключом («Аня» и «аня») — какая из них настоящая, решает пользователь.
-        if ((keys.get(desNameKey(card)) ?? []).length > 1 || duplicates.has(card)) continue;
-        const own = asArray(aliases[card]);
+        if ((keys.get(desNameKey(card)) ?? []).length > 1 || duplicates.has(card) || hidden.has(card.toLowerCase())) continue;
+        const cardAliases = asArray(aliases[card]);
         const spellings = [...new Set([card.toLowerCase(), card.toLowerCase().replace(/ё/g, 'е')])];
         for (const spelling of spellings) {
             const pair = { variant: spelling, canonical: card };
-            if (unmerged.has(pairKey(pair)) || includesName(own, spelling)) continue;
-            if (known.has(pairKey(pair))) {
+            if (refused.has(spellingKey(pair)) || unmerged.has(pairKey(pair)) || includesName(cardAliases, spelling)) continue;
+            if (known.has(spellingKey(pair))) {
                 // Мы его уже дописывали, а теперь его нет: убрали в Workshop — больше не трогаем.
-                settings.unmerged = [...asArray(settings.unmerged), pair];
-                unmerged.add(pairKey(pair));
+                removedByUser.push(pair);
+                refused.add(spellingKey(pair));
                 changed = true;
                 continue;
             }
+            // «артем» у карточки «Артём» не отбираем у карточки «Артем» из другого чата (и наоборот).
+            if ([...(owners.get(spelling) ?? [])].some((owner) => owner !== card)) continue;
             if (!des.names.addAlias(card, spelling)) continue;
             added.push(pair);
-            known.add(pairKey(pair));
+            known.add(spellingKey(pair));
+            own(spelling, card);
             counters.caseAliases += 1;
             changed = true;
         }
     }
     if (!changed) return;
     settings.caseAliasesAdded = added;
+    settings.caseAliasesRemoved = removedByUser;
     des.names.save();
+    saveSettings();
+}
+
+/**
+ * Однократно: убрать из разъединённых пары, которые туда по ошибке положил учёт алиасов-написаний (0.6.2 и раньше).
+ * Он сравнивал написания со свёрткой ё: дописав «алёна» к «Алёна», считал «алена» убранной пользователем — и пара
+ * «алена» ↛ «Алёна» не давала склеить «Алена» и в режиме «Вместе с ответом».
+ */
+function migrateCaseAliases() {
+    const settings = moduleSettings();
+    if (settings.caseAliasesMigrated) return;
+    const added = new Set(asArray(settings.caseAliasesAdded).map(spellingKey));
+    const before = asArray(settings.unmerged);
+    const after = before.filter((pair) => {
+        const lower = String(pair?.canonical ?? '').toLowerCase();
+        const plain = lower.replace(/ё/g, 'е');
+        return !(plain !== lower && pair.variant === plain && added.has(spellingKey({ variant: lower, canonical: pair.canonical })));
+    });
+    settings.caseAliasesMigrated = true;
+    if (after.length !== before.length) {
+        settings.unmerged = after;
+        log.info(`Имена: из разъединённых убраны пары, которые туда по ошибке попали из алиасов-написаний: ${before.length - after.length}.`);
+    }
     saveSettings();
 }
 
@@ -293,28 +380,61 @@ function restoreAfterWorkshop() {
 }
 
 /**
- * Склейки из журнала, чьих алиасов в DES уже нет (убрали в Workshop или каталоге): уважаем это —
- * пара больше не склеивается. Пока Workshop открыт или ждёт проверки, не трогаем.
+ * Склейки из журнала, которых в DES уже нет: алиас убрали в Workshop или каталоге, скрытое имя вернули на панель.
+ * Уважаем это — пара больше не склеивается. Скрытие сверяем только в его чате (у каждого чата свой список
+ * скрытых), старые записи без чата сами не разъединяем. Удалённая карточка уносит все свои алиасы — такую склейку
+ * просто забываем; удалена ли карточка, видно только в её чате. Пока Workshop открыт или ждёт проверки, не трогаем.
  */
 function reconcileJournal() {
-    if (!env?.des || env.des.workshopOpen() || workshopGuard.length) return;
-    const aliases = env.des.names.aliases();
-    const removed = env.des.roster.available() ? env.des.roster.removed() : null;
+    const des = env?.des;
+    if (!des || des.workshopOpen() || workshopGuard.length) return;
+    const aliases = des.names.aliases();
+    const removed = des.roster.available() ? des.roster.removed() : null;
+    const { npc } = des.names.cards();
     const settings = moduleSettings();
-    const gone = asArray(settings.journal).filter((entry) => (entry.kind === 'hide'
-        ? removed && !includesName(removed, entry.variant)
-        : !includesName(asArray(aliases[entry.canonical]), entry.variant)));
-    if (!gone.length) return;
-    const goneKeys = new Set(gone.map(pairKey));
-    settings.journal = asArray(settings.journal).filter((entry) => !goneKeys.has(pairKey(entry)));
+    const gone = [];
+    const deleted = [];
+    for (const entry of asArray(settings.journal)) {
+        if (entry.kind === 'hide') {
+            if (removed && entryChat(entry) === 'this' && !includesName(removed, entry.variant)) gone.push(entry);
+            continue;
+        }
+        if (includesName(asArray(aliases[entry.canonical]), entry.variant)) continue;
+        // Другие алиасы карточки на месте — убрали именно этот.
+        if (Object.hasOwn(aliases, entry.canonical)) gone.push(entry);
+        // Нет ни одного: либо убрали все, либо карточку удалили (DES стирает её алиасы) — видно только в её чате.
+        else if (entryChat(entry) === 'other') continue;
+        else if (npc.includes(entry.canonical)) gone.push(entry);
+        else deleted.push(entry);
+    }
+    if (!gone.length && !deleted.length) return;
+    const dropped = new Set([...gone, ...deleted]);
+    settings.journal = asArray(settings.journal).filter((entry) => !dropped.has(entry));
     const unmerged = asArray(settings.unmerged);
     for (const entry of gone) {
         if (!unmerged.some((item) => pairKey(item) === pairKey(entry))) unmerged.push({ variant: entry.variant, canonical: entry.canonical });
     }
     settings.unmerged = unmerged;
     saveSettings();
-    log.info(`Имена: склейки убраны вне модуля и больше не повторяются: ${gone.map((entry) => `«${entry.variant}» → «${entry.canonical}»`).join(', ')}.`);
+    const list = (entries) => entries.map((entry) => `«${entry.variant}» → «${entry.canonical}»`).join(', ');
+    if (gone.length) log.info(`Имена: склейки убраны вне модуля и больше не повторяются: ${list(gone)}.`);
+    if (deleted.length) log.info(`Имена: карточки удалены вместе с алиасами — склейки забыты: ${list(deleted)}.`);
     notifyChange();
+}
+
+/**
+ * DES при каждой загрузке чата делает карточку из каждого скрытого имени без карточки (orphan-adopt) — скрытая
+ * модулем форма имени игрока («Лизы») стала бы NPC. Убираем такие заготовки для своих скрытий этого чата
+ * (и старых записей без чата: тронем только нетронутые заготовки DES). Зовётся, когда DES уже загрузил чат.
+ */
+function forgetAdoptedPersonaForms() {
+    const des = env?.des;
+    if (!des?.roster.available()) return;
+    const names = asArray(moduleSettings().journal)
+        .filter((entry) => entry.kind === 'hide' && entryChat(entry) !== 'other')
+        .map((entry) => entry.variant);
+    const dropped = des.roster.forgetAdopted(names);
+    if (dropped.length) log.info(`Имена: DES завёл карточки для скрытых форм имени игрока — убраны: ${dropped.map((name) => `«${name}»`).join(', ')}.`);
 }
 
 // ─── Раскраска реплик ──────────────────────────────────────────────────────
@@ -377,29 +497,45 @@ function harvestSpeakerColors(text) {
     return true;
 }
 
+/** Последнее сообщение чата, если это ответ модели с текстом. */
+function lastReply() {
+    const chat = getContext().chat;
+    const message = Array.isArray(chat) ? chat[chat.length - 1] : null;
+    return message && !message.is_user && typeof message.mes === 'string' ? message : null;
+}
+
+/** Мысли персонажей, которые DES сейчас показывает: по ним раскраска ищет имена. */
+const currentThoughts = () => env?.des?.tracker.read().characterThoughts ?? null;
+
 /** Together: DES уже разобрал ответ в своём MESSAGE_RECEIVED, пузыри он разложит позже. */
 function onReplyParsed() {
     if (!isTogetherMode()) return;
-    // Новые карточки DES только что завёл — им тоже нужны алиасы-написания.
+    // Новые карточки DES только что завёл — им тоже нужны алиасы-написания (если склейка форм выключена).
     ensureCaseAliases();
-    const chat = getContext().chat;
-    const message = Array.isArray(chat) ? chat[chat.length - 1] : null;
-    if (message && !message.is_user) harvestSpeakerColors(message.mes);
+    const message = lastReply();
+    // Мысли персонажей DES обновил, только если в ответе был трекер с персонажами; иначе там прошлый ответ.
+    if (!message || !env.des.names.fromReply(message.mes).length) return;
+    harvestSpeakerColors(message.mes);
+    harvestedThoughts = currentThoughts();
 }
 
 /** Separate/external: трекер пришёл отдельным запросом, пузыри могли уже стоять — раскладываем заново. */
 function onSeparateTrackerDone() {
     ensureCaseAliases();
-    const chat = getContext().chat;
-    const message = Array.isArray(chat) ? chat[chat.length - 1] : null;
-    if (message && !message.is_user && harvestSpeakerColors(message.mes)) env.des.bubbles.reapplyLast();
+    const message = lastReply();
+    // DES шлёт событие и после неудачного запроса: мысли персонажей не изменились — это прошлый ответ, не раскрашиваем.
+    const thoughts = currentThoughts();
+    if (!message || thoughts === harvestedThoughts) return;
+    harvestedThoughts = thoughts;
+    if (harvestSpeakerColors(message.mes)) env.des.bubbles.reapplyLast();
 }
 
 // ─── Листы ─────────────────────────────────────────────────────────────────
 
 /**
- * Листы, сохранённые под формой имени, алиасом или полным именем из листа, — под имя карточки. Если у карточки
- * лист уже есть, его обновляет только более новый импорт (как повторный импорт у DES).
+ * Листы, сохранённые под формой имени, алиасом или полным именем из листа, — под имя карточки. Под карточку
+ * без листа лист просто переезжает. Лист карточки обновляет только свежий импорт (как повторный импорт у DES,
+ * заметки карточки остаются); старые листы на смене чата поверх листа карточки не ложатся.
  * @param {ReadonlySet<string>} [fresh] только что импортированные листы: о них — уведомление
  */
 function rekeySheets(fresh = new Set()) {
@@ -425,7 +561,7 @@ function rekeySheets(fresh = new Set()) {
             }
             ({ canonical, via } = decision);
         }
-        const result = des.sheets.rename(key, canonical);
+        const result = des.sheets.rename(key, canonical, { merge: fresh.has(key) });
         if (!result) {
             if (fresh.has(key)) log.info(`Имена: у карточки «${canonical}» уже есть лист не старше «${key}» — оставляю оба как есть.`);
             continue;
@@ -477,6 +613,26 @@ function watchSheetImport() {
     }, SHEET_IMPORT_POLL_MS);
 }
 
+/**
+ * То, что DES готовит в своём обработчике CHAT_CHANGED (loadChatData: данные трекера, заготовки карточек), —
+ * следующим заданием, после всех обработчиков события. Обычно DES и так раньше нас (он подписывается при запуске,
+ * мы — после проверки DES), но так порядок подписки не важен.
+ */
+function afterChatLoaded() {
+    clearTimeout(chatLoadedTimer);
+    chatLoadedTimer = setTimeout(() => {
+        chatLoadedTimer = 0;
+        if (!env?.des) return;
+        try {
+            // Мысли персонажей загруженного чата — не новые данные трекера.
+            harvestedThoughts = currentThoughts();
+            forgetAdoptedPersonaForms();
+        } catch (error) {
+            log.error('Имена: сбой после загрузки чата', error);
+        }
+    }, 0);
+}
+
 function onChatChanged() {
     // Импорт, которого ждали, был в прошлом чате.
     stopSheetWatch();
@@ -484,15 +640,21 @@ function onChatChanged() {
     reconcileJournal();
     rekeySheets();
     notifyChange();
+    afterChatLoaded();
 }
 
 /**
  * Разъединить: убрать алиас из DES (или вернуть скрытое имя) и запомнить пару. Прошлые ответы остаются как были.
- * @param {{ variant: string, canonical: string, kind?: string }} entry
+ * Скрытое имя возвращается только в своём чате — у другого чата свой список скрытых.
+ * @param {{ variant: string, canonical: string, kind?: string, chatId?: string }} entry
  */
 function unmerge(entry) {
     if (!env?.des) {
         notify('error', 'Модуль 2 не работает — алиасы DES сейчас недоступны.');
+        return;
+    }
+    if (entry.kind === 'hide' && entryChat(entry) === 'other') {
+        notify('info', `«${entry.variant}» скрыто в другом чате — разъединить можно, только открыв тот чат.`);
         return;
     }
     let removed = false;
@@ -511,7 +673,7 @@ function unmerge(entry) {
         if (removed) env.des.names.save();
     }
     const settings = moduleSettings();
-    settings.journal = asArray(settings.journal).filter((item) => pairKey(item) !== pairKey(entry));
+    settings.journal = asArray(settings.journal).filter((item) => journalKey(item) !== journalKey(entry));
     if (!asArray(settings.unmerged).some((item) => pairKey(item) === pairKey(entry))) {
         settings.unmerged = [...asArray(settings.unmerged), { variant: entry.variant, canonical: entry.canonical }];
     }
@@ -630,8 +792,9 @@ function mountSection(section) {
             const hidden = entry.kind === 'hide';
             const gone = !hidden && aliases && !asArray(aliases[entry.canonical]).some((alias) => alias.toLowerCase() === String(entry.variant).toLowerCase());
             const via = entry.via ? ` (${VIA_NAMES[entry.via] ?? entry.via})` : '';
+            const elsewhere = hidden && entryChat(entry) === 'other' ? ' · в другом чате' : '';
             text.textContent = hidden
-                ? `«${entry.variant}» скрыто — форма «${entry.canonical}»${via} · ${formatDate(entry.at)}`
+                ? `«${entry.variant}» скрыто — форма «${entry.canonical}»${via} · ${formatDate(entry.at)}${elsewhere}`
                 : `«${entry.variant}» → «${entry.canonical}»${via} · ${formatDate(entry.at)}${gone ? ' · алиаса в DES уже нет' : ''}`;
             const button = menuButton('fa-link-slash', 'Разъединить', () => unmerge(entry));
             item.append(text, button);
@@ -681,6 +844,7 @@ export default {
             watchSheetImport();
         };
         document.addEventListener('click', importClickHandler, true);
+        migrateCaseAliases();
         onChatChanged();
         log.info('Модуль 2 (имена) включён.');
     },
@@ -692,6 +856,11 @@ export default {
         importClickHandler = null;
         clearInterval(workshopTimer);
         workshopTimer = 0;
+        // Проверка после Workshop — дело этого включения: следующее начнёт с чистого листа.
+        workshopGuard = [];
+        clearTimeout(chatLoadedTimer);
+        chatLoadedTimer = 0;
+        harvestedThoughts = undefined;
         stopSheetWatch();
         env = null;
         notifyChange();
@@ -703,7 +872,7 @@ export default {
         const notes = [];
         const mode = env.des.generationMode();
         if (mode !== DES_KEYS.togetherMode) {
-            notes.push({ level: 'warn', text: `Режим генерации DES — «${MODE_NAMES[mode] ?? mode}»: склейка форм работает только в режиме «Вместе с ответом» (о похожих именах спрашивает попап DES). Регистр и ё, раскраска реплик и листы работают.` });
+            notes.push({ level: 'warn', text: `Режим генерации DES — «${DES_MODE_NAMES[mode] ?? mode}»: склейка форм работает только в режиме «${DES_MODE_NAMES.together}» (о похожих именах спрашивает попап DES). Регистр и ё, раскраска реплик и листы работают.` });
         }
         const exceptions = new Set(asArray(moduleSettings().exceptions).map(normalizeRussianName));
         const duplicates = findCaseDuplicates(env.des.names.cards().npc)

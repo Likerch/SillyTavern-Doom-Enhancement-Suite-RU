@@ -18,8 +18,10 @@ const FORMS = {
     'Лев': ['Льву', 'Львом', 'Льве'],
     'Пётр': ['Петру', 'Петром'],
     'Достоевский': ['Достоевского', 'Достоевскому', 'Достоевским'],
-    'Толстая': ['Толстой', 'Толстую'],
+    'Толстая': ['Толстую'],
     'Аня Петрова': ['Ани Петровой', 'Аню Петрову', 'Аней Петровой'],
+    'Аня Толстая': ['Ани Толстой', 'Аню Толстую', 'Аней Толстой'],
+    'Мария Трубецкая': ['Марии Трубецкой', 'Марию Трубецкую'],
     'Мира': ['Миры', 'Мире', 'Миру', 'Мирой'],
 };
 
@@ -53,6 +55,22 @@ test('a female name is never merged into the male card it looks like a genitive 
     for (const form of ['Валерию', 'Валерием']) assert.ok(isCaseFormOf(form, 'Валерий'), form);
 });
 
+test('a male -ой surname is never merged into the female -ая card it looks like a case of', () => {
+    for (const [variant, canonical] of [['Толстой', 'Толстая'], ['Трубецкой', 'Трубецкая'], ['Донской', 'Донская'], ['Мария Трубецкой', 'Мария Трубецкая']]) {
+        assert.ok(!isCaseFormOf(variant, canonical), `${variant} ≠ ${canonical}`);
+    }
+    assert.equal(decideName('Толстой', context({ npc: ['Толстая'] })).action, 'skip');
+    assert.equal(decideName('Трубецкой', context({ npc: ['Мария Трубецкая'] })).action, 'skip');
+    assert.equal(decideName('Толстой', context({ npc: ['Аня Толстая'] })).action, 'skip');
+    // Другое слово явно в косвенном падеже — значит, и фамилия в нём.
+    assert.equal(decideName('Ани Толстой', context({ npc: ['Аня Толстая'] })).canonical, 'Аня Толстая');
+    // В тексте (ключи лорбука, раскраска реплик) «у Толстой» — по-прежнему она.
+    assert.ok(wordForms('толстая', { genitive: true }).includes('толстой'));
+    assert.ok(!wordForms('толстая').includes('толстой'));
+    assert.ok(isCaseFormOf('Андрея Петрова', 'Андрей Петров'));
+    assert.ok(!isCaseFormOf('Ивана Петрова', 'Иван Петров'));
+});
+
 test('word counts must match: first name vs full name is not a case form', () => {
     assert.ok(!isCaseFormOf('Аня', 'Аня Петрова'));
     assert.ok(!isCaseFormOf('Акари Саотомэ', 'Акари'));
@@ -60,13 +78,13 @@ test('word counts must match: first name vs full name is not a case form', () =>
     assert.ok(!isCaseFormOf('Мисс Танака (голос из зала)', 'Мисс Танака'));
 });
 
-/** Контекст как у модуля: ключ DES — нижний регистр без диакритики. */
-function context({ npc = [], users = [], aliases = [], excluded = () => null } = {}) {
+/** Контекст как у модуля: ключ DES — нижний регистр без диакритики; `hidden` — скрытые из Present Characters. */
+function context({ npc = [], users = [], aliases = [], hidden = [], excluded = () => null } = {}) {
     const keyOf = (name) => String(name).trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ');
     const cardKeys = new Map();
-    for (const name of [...npc, ...users]) cardKeys.set(keyOf(name), [...(cardKeys.get(keyOf(name)) ?? []), name]);
+    for (const name of [...npc, ...hidden, ...users]) cardKeys.set(keyOf(name), [...(cardKeys.get(keyOf(name)) ?? []), name]);
     const aliasKeys = new Set(aliases.map((alias) => alias.toLowerCase()));
-    return { npcCards: npc, keyOf, cardKeys, isAlias: (name) => aliasKeys.has(name.trim().toLowerCase()), excluded };
+    return { npcCards: npc, hiddenCards: hidden, keyOf, cardKeys, isAlias: (name) => aliasKeys.has(name.trim().toLowerCase()), excluded };
 }
 
 test('a case form of an NPC card becomes its alias', () => {
@@ -126,29 +144,62 @@ test('titles and Japanese honorifics are stripped, kinship words are not', () =>
     assert.equal(decideName('Akari-chan', ctx).canonical, 'Akari');
     assert.equal(decideName('сестра Ани', ctx).action, 'skip');
     assert.equal(decideName('мать Ани', ctx).action, 'skip');
+    // «Хан» бывает и именем.
+    assert.equal(decideName('Хан Соло', context({ npc: ['Соло'] })).action, 'skip');
 });
 
-test('a first name or a surname alone leads to the full card, unless two cards share it', () => {
+test('a first name alone leads to the full card, unless two cards share it; a surname alone is left to DES', () => {
     const ctx = context({ npc: ['Аня Петрова', 'Дарган фон Вартенбург'] });
     assert.deepEqual(decideName('Аня', ctx), { action: 'alias', canonical: 'Аня Петрова', via: 'часть имени' });
     assert.equal(decideName('Ани', ctx).canonical, 'Аня Петрова');
-    assert.equal(decideName('Петровой', ctx).canonical, 'Аня Петрова');
-    assert.equal(decideName('Вартенбургу', ctx).canonical, 'Дарган фон Вартенбург');
+    assert.equal(decideName('Даргану', ctx).canonical, 'Дарган фон Вартенбург');
+    // Фамилия одна — однофамилец или родня: решает попап DES.
+    assert.equal(decideName('Петровой', ctx).action, 'skip');
+    assert.equal(decideName('Вартенбургу', ctx).action, 'skip');
+    assert.equal(decideName('Петров', context({ npc: ['Иван Петров'] })).action, 'skip');
     assert.equal(decideName('фон', ctx).action, 'skip');
+    // Имя после звания — всё ещё имя: «Танака» — это «Мисс Танака».
+    assert.equal(decideName('Танака', context({ npc: ['Мисс Танака'] })).canonical, 'Мисс Танака');
+    assert.equal(decideName('Дарган', context({ npc: ['Капитан Дарган фон Вартенбург'] })).canonical, 'Капитан Дарган фон Вартенбург');
     const twins = decideName('Аня', context({ npc: ['Аня Петрова', 'Аня Смирнова'] }));
     assert.equal(twins.reason, 'подходит нескольким карточкам');
     // Есть карточка ровно «Аня» — форма идёт к ней, а не к «Ане Петровой».
     assert.equal(decideName('Ане', context({ npc: ['Аня', 'Аня Петрова'] })).canonical, 'Аня');
 });
 
+test('descriptor, kinship and role cards are not reached by a single word', () => {
+    for (const [variant, card] of [['Ани', 'Мать Ани'], ['Анны', 'Брат Анны'], ['Даргана', 'Сын Даргана'], ['Мать', 'Мать Ани'],
+        ['Стражник', 'Старший стражник'], ['Стражник', 'Стражник у ворот'], ['Девушка', 'Девушка в красном'], ['Тётя', 'Тётя Маша']]) {
+        assert.equal(decideName(variant, context({ npc: [card] })).action, 'skip', `${variant} ↛ ${card}`);
+    }
+});
+
 test('diminutives lead to the full name and back, ambiguity is left to DES', () => {
     assert.deepEqual(decideName('Саша', context({ npc: ['Александр'] })), { action: 'alias', canonical: 'Александр', via: 'уменьшительное' });
     assert.equal(decideName('Саше', context({ npc: ['Александр'] })).canonical, 'Александр');
     assert.equal(decideName('Аня', context({ npc: ['Анна Петрова'] })).canonical, 'Анна Петрова');
-    assert.equal(decideName('Александру', context({ npc: ['Саша'] })).canonical, 'Саша');
+    assert.equal(decideName('Ивану', context({ npc: ['Ваня'] })).canonical, 'Ваня');
+    assert.equal(decideName('Лизонька', context({ npc: ['Лиза'] })).canonical, 'Лиза');
     assert.equal(decideName('Шура', context({ npc: ['Саша'] })).canonical, 'Саша');
+    assert.equal(decideName('Женька', context({ npc: ['Женя'] })).canonical, 'Женя');
     assert.equal(decideName('Саша', context({ npc: ['Александр', 'Александра'] })).reason, 'подходит нескольким карточкам');
     assert.equal(decideName('Маша', context({ npc: ['Александр'] })).action, 'skip');
+});
+
+test('a card named by an ambiguous diminutive does not swallow a full name of either gender', () => {
+    // Женя — и Евгений, и Евгения; Саша — и Александр, и Александра; Аля — Александра или Алина, а Сашка бывает и мальчиком.
+    for (const [variant, card] of [['Евгений', 'Женя'], ['Евгения', 'Женя'], ['Александру', 'Саша'], ['Александр', 'Саша'], ['Сашка', 'Аля']]) {
+        assert.equal(decideName(variant, context({ npc: [card] })).action, 'skip', `${variant} ↛ ${card}`);
+    }
+});
+
+test('short forms that are names in their own right are not diminutives', () => {
+    for (const [variant, card] of [['Кит', 'Никита'], ['Лора', 'Лариса'], ['Лара', 'Лариса'], ['Алекс', 'Александр'], ['Тина', 'Кристина'],
+        ['Лина', 'Ангелина'], ['Дина', 'Диана'], ['Ника', 'Вероника'], ['Мила', 'Людмила'], ['Элиза', 'Елизавета'], ['Натали', 'Наталья'],
+        ['Марго', 'Маргарита'], ['Ася', 'Анастасия'], ['Вита', 'Виктория']]) {
+        assert.equal(decideName(variant, context({ npc: [card] })).action, 'skip', `${variant} ↛ ${card}`);
+    }
+    assert.equal(decideName('Настя', context({ npc: ['Анастасия'] })).canonical, 'Анастасия');
 });
 
 test('transliteration links Cyrillic and Latin spellings', () => {
@@ -158,8 +209,20 @@ test('transliteration links Cyrillic and Latin spellings', () => {
     assert.equal(decideName('Сётаро', context({ npc: ['Shotaro'] })).canonical, 'Shotaro');
     assert.equal(decideName('Тиё', context({ npc: ['Chiyo'] })).canonical, 'Chiyo');
     assert.equal(decideName('Акари', context({ npc: ['Akari Saotome'] })).canonical, 'Akari Saotome');
+    assert.equal(decideName('Саотомэ', context({ npc: ['Akari Saotome'] })).action, 'skip');
     assert.equal(decideName('Ana', context({ npc: ['Аня'] })).action, 'skip');
     assert.equal(decideName('Mira', context({ npc: ['Аня'] })).action, 'skip');
+    // «З» внутри слова бывает «s», в начале — нет: Зара — не Sara.
+    assert.equal(decideName('Lisa', context({ npc: ['Лиза'] })).canonical, 'Лиза');
+    assert.equal(decideName('Rosa', context({ npc: ['Роза'] })).canonical, 'Роза');
+    assert.equal(decideName('Zara', context({ npc: ['Зара'] })).canonical, 'Зара');
+    assert.equal(decideName('Sara', context({ npc: ['Зара'] })).action, 'skip');
+});
+
+test('cards hidden from Present Characters are neither merged nor merge targets', () => {
+    assert.equal(decideName('Ани', context({ hidden: ['Аня'] })).action, 'skip');
+    assert.equal(decideName('Лизы', context({ hidden: ['Лизы'], users: ['Лиза'] })).reason, 'это карточка');
+    assert.equal(decideName('Ани', context({ npc: ['Аня'], hidden: ['Ани'] })).reason, 'это карточка');
 });
 
 test('forms of a player character are hidden, never aliased', () => {
@@ -202,8 +265,6 @@ test('a sheet saved under a fuller name goes to the short card', () => {
     assert.deepEqual(decideSheetOwner('Флоренс Клеймор (урождённая Блэкени)', ctx), { action: 'alias', canonical: 'Флоренс', via: 'полное имя' });
     assert.equal(decideSheetOwner('Шарлотта Клеймор', ctx).canonical, 'Шарлотта');
     assert.equal(decideSheetOwner('Леди Флоренс Клеймор', ctx).canonical, 'Флоренс');
-    // Восточный порядок: фамилия первой.
-    assert.equal(decideSheetOwner('Ямада Акари', context({ npc: ['Акари'] })).canonical, 'Акари');
     assert.equal(decideSheetOwner('Florence Claymore', context({ npc: ['Florence'] })).canonical, 'Florence');
     // Без пояснения — ровно карточка.
     assert.deepEqual(decideSheetOwner('Флоренс Клеймор (урождённая Блэкени)', context({ npc: ['Флоренс Клеймор', 'Флоренс'] })),
@@ -216,13 +277,21 @@ test('a sheet saved under a fuller name goes to the short card', () => {
 
 test('a fuller sheet name prefers the fullest card and leaves real ambiguity alone', () => {
     assert.equal(decideSheetOwner('Флоренс Клеймор Младшая', context({ npc: ['Флоренс', 'Флоренс Клеймор'] })).canonical, 'Флоренс Клеймор');
-    const family = decideSheetOwner('Флоренс Клеймор', context({ npc: ['Флоренс', 'Клеймор'] }));
-    assert.equal(family.action, 'skip');
-    assert.deepEqual(family.candidates.sort(), ['Клеймор', 'Флоренс']);
+    const sisters = decideSheetOwner('Флоренс Клеймор Блэкени', context({ npc: ['Флоренс Клеймор', 'Флоренс Блэкени'] }));
+    assert.equal(sisters.action, 'skip');
+    assert.deepEqual(sisters.candidates.sort(), ['Флоренс Блэкени', 'Флоренс Клеймор']);
     assert.equal(decideSheetOwner('Флоренс Клеймор', context({ npc: ['Шарлотта'] })).action, 'skip');
     assert.equal(decideSheetOwner('Флоренс', context({ npc: ['Шарлотта'] })).action, 'skip');
     // Слово карточки должно стоять в имени целиком: «Флор» — не «Флоренс».
     assert.equal(decideSheetOwner('Флоренс Клеймор', context({ npc: ['Флор'] })).action, 'skip');
+});
+
+test('a sheet goes by its first name: a surname or a title-only card does not own it', () => {
+    assert.equal(decideSheetOwner('Флоренс Клеймор', context({ npc: ['Мистер Клеймор', 'Фло'] })).action, 'skip');
+    assert.equal(decideSheetOwner('Артур Клеймор', context({ npc: ['Клеймор'] })).action, 'skip');
+    assert.equal(decideSheetOwner('Флоренс Клеймор', context({ npc: ['Флоренс', 'Клеймор'] })).canonical, 'Флоренс');
+    // Восточный порядок (фамилия первой) больше не угадывается: «Ямада» — первое слово.
+    assert.equal(decideSheetOwner('Ямада Акари', context({ npc: ['Акари'] })).action, 'skip');
 });
 
 test('sheet owners respect exceptions and the player character', () => {

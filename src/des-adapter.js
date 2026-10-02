@@ -147,8 +147,9 @@ export const DES_UI = Object.freeze({
         // лист персонажа: DES читает эти узлы обратно для «Copy Sheet»
         '.rpg-cs-hero-name', '.rpg-cs-title', '.rpg-cs-section-title', '.rpg-cs-section-body', '.rpg-cs-section-emoji',
         '.rpg-cs-timeline-status', '.rpg-cs-thought-text',
-        // Lore Library
+        // Lore Library. Название кампании DES читает обратно в окно «Rename» (lorebook.js); «Unfiled» — подпись DES, её переводим
         '.rpg-lb-tree-book-name', '.rpg-lb-breadcrumb-part', '.rpg-lb-entry-row-pos',
+        '.rpg-lb-campaign-group:not(.unfiled-group) .rpg-lb-campaign-name',
         // журналы, инспектор, What's New, ростер, версии
         '.rpg-log-entry', '.rpg-notif-text', '.rpg-notif-time', '.dooms-wn-item-title', '.dooms-wn-item-body', '.dooms-wn-version',
         '.cr-tile-name', '#rpg-preset-entity-name', '#dooms-version-display', '.dooms-github-star-count',
@@ -159,7 +160,7 @@ export const DES_UI = Object.freeze({
         '.dooms-pb-back-label', '#rpg-ws-relationship-preview', '#rpg-fab-menu-toggles', '.dooms-fab-menu-item',
         '#rpg-connection-profile', '#rpg-update-branch', '#rpg-preset-select', '#cw-linked-persona', '#rpg-update-status',
         '#rpg-current-version', '#rpg-external-api-test-result', '#rpg-theme-badge',
-        '.cw-campaign-badge-text', '.cw-version-label', '.rpg-lb-campaign-name', '.rpg-lb-panel-title', '.rpg-lb-editor-title',
+        '.cw-campaign-badge-text', '.cw-version-label', '.rpg-lb-panel-title', '.rpg-lb-editor-title',
         '.rpg-lb-mobile-back', '.rpg-lb-tab', '.rpg-lb-entry-row-title', '.rpg-lb-context-menu-item', '.rpg-lb-move-menu',
         '.rpg-inspector-body', '.dooms-alias-card',
     ]),
@@ -196,18 +197,20 @@ export const DES_UI = Object.freeze({
 });
 
 /**
- * ES-модули DES, которые нужны модулям 2–4, и экспорты, без которых они не работают.
+ * ES-модули DES, которые нужны модулям 2–4, и экспорты, без которых они не работают. Только то, чем адаптер
+ * пользуется: лишний экспорт, переименованный в DES, остановил бы модули 2–4 зря.
  * Все они статически импортируются в index.js DES, поэтому к нашему импорту уже загружены:
  * мы получаем те же экземпляры и не запускаем код DES повторно.
  * `optional` — без них гард пропускает данные, но отключается одна функция (раскраска, листы и т. п.).
+ * `optionalExports` — без них модуль DES остаётся, не работает только то, что их вызывает.
  */
 export const DES_MODULES = Object.freeze({
     state: { path: 'src/core/state.js', exports: { extensionSettings: 'object', lastGeneratedData: 'object', committedTrackerData: 'object' } },
     persistence: { path: 'src/core/persistence.js', exports: { saveSettings: 'function', saveChatData: 'function' } },
-    aliases: { path: 'src/systems/features/characterAliases.js', exports: { addCharacterAlias: 'function', applyCharacterAliases: 'function' } },
+    aliases: { path: 'src/systems/features/characterAliases.js', exports: { addCharacterAlias: 'function' } },
     parser: { path: 'src/systems/generation/parser.js', exports: { parseQuests: 'function', parseResponse: 'function' } },
     weather: { path: 'src/systems/ui/weatherEffects.js', exports: { WEATHER_PATTERNS_BY_LANGUAGE: 'object', updateWeatherEffect: 'function', getWeatherKeywordsAsPromptString: 'function' } },
-    portraitBar: { path: 'src/systems/ui/portraitBar.js', exports: { updatePortraitBar: 'function', clearPortraitCache: 'function' } },
+    portraitBar: { path: 'src/systems/ui/portraitBar.js', exports: { updatePortraitBar: 'function' } },
     thoughts: { path: 'src/systems/rendering/thoughts.js', exports: { updateChatThoughts: 'function' } },
     sceneHeaders: { path: 'src/systems/rendering/sceneHeaders.js', exports: { updateChatSceneHeaders: 'function', resetSceneHeaderCache: 'function' } },
     roster: {
@@ -222,10 +225,15 @@ export const DES_MODULES = Object.freeze({
     },
     fullsheet: {
         path: 'src/systems/ui/fullsheetButtons.js',
-        exports: { messageHasFullSheet: 'function', injectFullSheetButtonForMessage: 'function' },
+        exports: { messageHasFullSheet: 'function' },
+        // Только для sheets.syncButton: без него листы под именем карточки и кнопки модуля 6 работают.
+        optionalExports: { injectFullSheetButtonForMessage: 'function' },
         optional: true,
     },
 });
+
+/** Режимы генерации трекера DES (settings.generationMode) — подписи, как их переводит модуль 1 (locales/ru.json). */
+export const DES_MODE_NAMES = Object.freeze({ together: 'Вместе с ответом', separate: 'Отдельным запросом', external: 'Внешний API' });
 
 export const DES_KEYS = Object.freeze({
     /** chat_metadata[...]: стейт чата; DES пересобирает объект целиком при каждом сохранении. */
@@ -390,16 +398,35 @@ export function hasDesOffSceneMarker(text) {
 const sheetImportedAt = (sheet) => Date.parse(/** @type {any} */ (sheet)?.importedAt ?? '') || 0;
 
 /**
+ * Лист `sheet` поверх листа карточки `card`, как повторный импорт у DES (`importFullSheetFromMessage`): теги —
+ * только из нового листа. Заметки пишет пользователь у карточки — её режим и разделы заметок остаются,
+ * заметки, заведённые под другим именем, дописываются следом.
+ * @param {Record<string, any>} card
+ * @param {Record<string, any>} sheet
+ */
+function mergeDesSheets(card, sheet) {
+    const merged = { ...card, ...sheet };
+    if (!sheet?.rawTags) delete merged.rawTags;
+    if (card?.mode !== undefined) merged.mode = card.mode;
+    const own = Array.isArray(card?.notesSections) ? card.notesSections : [];
+    const known = new Set(own.map((note) => note?.id).filter((id) => id !== undefined));
+    const extra = (Array.isArray(sheet?.notesSections) ? sheet.notesSections : [])
+        .filter((note) => !own.includes(note) && !(note?.id !== undefined && known.has(note.id)));
+    if (Array.isArray(card?.notesSections) || extra.length) merged.notesSections = [...own, ...extra];
+    return merged;
+}
+
+/**
  * Переложить лист в хранилище листов чата DES (`characterSheets`) под другое имя. Ключи DES сравнивает без
- * учёта регистра. Если лист под этим именем уже есть, более новый импорт (`importedAt`) ложится поверх, как
- * повторный импорт у DES (`importFullSheetFromMessage`): заметки остаются, а теги — только из нового листа.
- * Лист старее — не трогаем.
+ * учёта регистра. Под свободное имя лист просто переезжает. Если лист под этим именем уже есть, то только
+ * с `merge` и только более новый импорт (`importedAt`) ложится поверх (mergeDesSheets); иначе не трогаем.
  * @param {Record<string, any>} store
  * @param {string} from
  * @param {string} to
+ * @param {{ merge?: boolean }} [options] `merge` — можно обновить уже существующий лист (свежий импорт)
  * @returns {'moved'|'merged'|null}
  */
-export function moveDesSheet(store, from, to) {
+export function moveDesSheet(store, from, to, { merge = false } = {}) {
     if (!store || !(from in store) || from === to) return null;
     const target = Object.keys(store).find((key) => key.toLowerCase() === String(to).toLowerCase());
     if (target === from) return null;
@@ -407,13 +434,34 @@ export function moveDesSheet(store, from, to) {
     if (target === undefined) {
         store[to] = sheet;
     } else {
-        if (!(sheetImportedAt(sheet) > sheetImportedAt(store[target]))) return null;
-        const merged = { ...store[target], ...sheet };
-        if (!sheet?.rawTags) delete merged.rawTags;
-        store[target] = merged;
+        if (!merge || !(sheetImportedAt(sheet) > sheetImportedAt(store[target]))) return null;
+        store[target] = mergeDesSheets(store[target], sheet);
     }
     delete store[from];
     return target === undefined ? 'moved' : 'merged';
+}
+
+/** Заготовка карточки, которую DES заводит сам: в записи только значок (`{ emoji: '👤' }`). */
+const isDesCardStub = (entry) => Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry)
+    && Object.keys(entry).every((key) => key === 'emoji');
+
+/**
+ * При каждой загрузке чата DES делает карточку из каждого скрытого имени без карточки (orphan-adopt
+ * в loadChatData, persistence.js): так скрытая форма имени игрока становится NPC. Убирает из `known` такие
+ * заготовки для имён `names`, которые всё ещё скрыты (`removed`); карточки с данными не трогает.
+ * @param {Record<string, any>|null|undefined} known knownCharacters чата
+ * @param {readonly unknown[]|null|undefined} removed removedCharacters чата
+ * @param {readonly string[]} names
+ * @returns {string[]} убранные имена
+ */
+export function dropAdoptedCards(known, removed, names) {
+    if (!known || typeof known !== 'object' || !Array.isArray(removed) || !names.length) return [];
+    const lower = (name) => String(name).toLowerCase();
+    const hidden = new Set(removed.map(lower));
+    const wanted = new Set(names.map(lower));
+    const dropped = Object.keys(known).filter((name) => wanted.has(lower(name)) && hidden.has(lower(name)) && isDesCardStub(known[name]));
+    for (const name of dropped) delete known[name];
+    return dropped;
 }
 
 /**
@@ -422,7 +470,8 @@ export function moveDesSheet(store, from, to) {
  * @property {string|null} name       внутреннее имя ST, например `third-party/Dooms-Enhancement-Suite`
  * @property {string|null} version    версия из манифеста
  * @property {boolean} stDisabled     выключен в менеджере расширений ST
- * @property {boolean} loaded         скрипт DES загружен на страницу
+ * @property {boolean} loaded         скрипт DES загружен на страницу и DES запустился (появился его блок
+ *                                    в Extensions или кнопка «D»)
  * @property {boolean|null} ownEnabled собственный переключатель DES (`null` — неизвестно)
  * @property {string[]} missingSelectors жадные узлы DOM, которых не оказалось
  * @property {string[]} missingExports   экспорты DES, которых не оказалось
@@ -530,16 +579,21 @@ async function importDesModules(scriptUrl) {
     const namespaces = {};
     const missing = [];
     const missingOptional = [];
+    /** @param {any} namespace @param {Record<string, string>} exports @param {string} path */
+    const absent = (namespace, exports, path) => Object.entries(exports)
+        .filter(([exportName, type]) => typeof namespace[exportName] !== type || namespace[exportName] === null)
+        .map(([exportName]) => `${path} → ${exportName}`);
     for (const [key, spec] of Object.entries(DES_MODULES)) {
         const problems = [];
         try {
             const namespace = await import(new URL(spec.path, scriptUrl).href);
-            for (const [exportName, type] of Object.entries(spec.exports)) {
-                const value = namespace[exportName];
-                if (typeof value !== type || value === null) problems.push(`${spec.path} → ${exportName}`);
-            }
+            problems.push(...absent(namespace, spec.exports, spec.path));
             // Необязательный модуль с пропавшими экспортами не отдаём вовсе: функция просто выключится.
-            if (!spec.optional || !problems.length) namespaces[key] = namespace;
+            if (!spec.optional || !problems.length) {
+                namespaces[key] = namespace;
+                // Без необязательного экспорта модуль остаётся — гард только отметит, чего нет.
+                missingOptional.push(...absent(namespace, spec.optionalExports ?? {}, spec.path));
+            }
         } catch (error) {
             problems.push(`${spec.path} → модуль не загрузился (${error?.message ?? error})`);
         }
@@ -587,9 +641,18 @@ export async function inspectDes({ timeoutMs = 30000 } = {}) {
     facts.ownEnabled = savedBlob ? savedBlob.enabled !== false : null;
 
     // DES инициализируется асинхронно: сначала loadSettings, потом блок в Extensions, потом initUI с кнопкой «D».
-    // Появление этих узлов значит, что настройки DES уже загружены.
-    if (!await waitForElement(DES_SELECTORS.drawerToggle, timeoutMs)) facts.missingSelectors.push(DES_SELECTORS.drawerToggle);
-    if (facts.ownEnabled !== false && !await waitForElement(DES_SELECTORS.fab, timeoutMs)) facts.missingSelectors.push(DES_SELECTORS.fab);
+    // Появление этих узлов значит, что настройки DES уже загружены. Кнопки «D» у выключенного DES нет — её не ждём.
+    const [toggle, fab] = await Promise.all([
+        waitForElement(DES_SELECTORS.drawerToggle, timeoutMs),
+        facts.ownEnabled === false ? document.querySelector(DES_SELECTORS.fab) : waitForElement(DES_SELECTORS.fab, timeoutMs),
+    ]);
+    // Скрипт на странице, но не появилось ни того, ни другого: DES упал при запуске, а не обновился — его модули не трогаем.
+    if (!toggle && !fab) {
+        facts.loaded = false;
+        return { facts, api: null };
+    }
+    if (!toggle) facts.missingSelectors.push(DES_SELECTORS.drawerToggle);
+    if (!fab && facts.ownEnabled !== false) facts.missingSelectors.push(DES_SELECTORS.fab);
 
     const { namespaces, missing, missingOptional } = await importDesModules(located.scriptUrl);
     facts.missingExports = missing;
@@ -894,6 +957,17 @@ function createApi(located, namespaces) {
             save() {
                 attempt('сохранение персонажей', () => roster.saveCharacterRosterChange());
             },
+            /**
+             * Убрать заготовки карточек, которые DES завёл при загрузке чата для скрытых имён `names`
+             * (dropAdoptedCards), и сохранить чат. @returns {string[]} убранные имена
+             */
+            forgetAdopted(names) {
+                if (!roster) return [];
+                const known = getContext().chatMetadata?.[DES_KEYS.chatMetadata]?.knownCharacters;
+                const dropped = dropAdoptedCards(known, roster.getActiveRemovedCharacters(), names);
+                if (dropped.length) attempt('сохранение чата', () => persistence.saveChatData());
+                return dropped;
+            },
         }),
 
         /** Пузыри чата: раскладка реплик по персонажам. */
@@ -940,19 +1014,23 @@ function createApi(located, namespaces) {
                     return false;
                 }
             },
-            /** Пересчитать кнопку импорта у сообщения (DES сам добавит или уберёт). */
+            /** Пересчитать кнопку импорта у сообщения (DES сам добавит или уберёт); без экспорта — ничего. */
             syncButton(messageId) {
+                if (typeof fullsheet?.injectFullSheetButtonForMessage !== 'function') return;
                 attempt('обновление кнопки импорта', () => fullsheet.injectFullSheetButtonForMessage(messageId));
             },
             /** Живой объект { имя: лист } этого чата или `null`. */
             store: () => getContext().chatMetadata?.[DES_KEYS.chatMetadata]?.[DES_KEYS.characterSheets] ?? null,
             /**
-             * Переложить лист под другое имя и сохранить чат; лист под тем именем обновляется, только если
-             * этот новее (moveDesSheet). @returns {'moved'|'merged'|null}
+             * Переложить лист под другое имя и сохранить чат. Лист под тем именем обновляется, только если
+             * разрешено `merge` и этот новее (moveDesSheet). @returns {'moved'|'merged'|null}
+             * @param {string} from
+             * @param {string} to
+             * @param {{ merge?: boolean }} [options]
              */
-            rename(from, to) {
+            rename(from, to, options) {
                 const store = getContext().chatMetadata?.[DES_KEYS.chatMetadata]?.[DES_KEYS.characterSheets];
-                const result = moveDesSheet(store, from, to);
+                const result = moveDesSheet(store, from, to, options);
                 if (result) attempt('сохранение чата', () => persistence.saveChatData());
                 return result;
             },

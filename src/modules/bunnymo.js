@@ -6,7 +6,8 @@
  * переведёнными тегами, паки с запретом рекурсии не достать из архивов персонажей. Модуль чинит это снаружи:
  *
  * 1. Языковой замок — короткая системная вставка, пока в генерации участвуют записи BunnyMo или вставки
- *    CarrotKernel: проза по-русски, машинный слой (теги, SECTION N/M, Name) по-английски.
+ *    CarrotKernel: проза по-русски, машинный слой (теги, SECTION N/M, Name) по-английски. Только в обычных
+ *    генерациях: фоновые (quiet — промпт картинки, классификация эмоций, саммари, /gen) идут без него.
  * 2. Правки записей на лету (WORLDINFO_ENTRIES_LOADED, файлы лорбуков не меняются): русские ключи детекторов
  *    и «анти-клэнкера», детекторы — только по тексту чата, архетипы с невидимой строкой, ключи архивов со
  *    всеми падежами имени.
@@ -16,11 +17,11 @@
 import { PROMPT_POSITION, PROMPT_ROLE, getContext, outgoingPromptRegexes, rerenderMessage } from '../st.js';
 import { log } from '../log.js';
 import { getSettings } from '../settings.js';
-import { BUNNYMO_ENTRIES, archiveTags, classifyWorlds, isCharacterArchive, packVocabulary } from '../bunnymo-adapter.js';
+import { BUNNYMO_ENTRIES, archiveNameWords, archiveTags, classifyWorlds, isCharacterArchive, packVocabulary } from '../bunnymo-adapter.js';
 import { ckMarkedBooks, hasCkSlots } from '../ck-adapter.js';
 import { canonicalCardName } from '../name-context.js';
 import { normalizeMachineLayer } from '../lib/bunnymo-normalize.js';
-import { patchEntries } from '../lib/bunnymo-patch.js';
+import { archiveFormsOf, patchEntries } from '../lib/bunnymo-patch.js';
 import { LANGUAGE_LOCK_RU } from '../lib/bunnymo-ru.js';
 import { wordForms } from '../lib/russian-names.js';
 
@@ -35,12 +36,12 @@ const OPTIONS = [
     {
         key: 'languageLock',
         title: 'Языковой замок',
-        description: 'Пока в генерации участвует BunnyMo или CarrotKernel, модели напоминают: проза и листы — по-русски, теги, «SECTION N/M» и «Name» — по-английски, имя — как на карточке.',
+        description: 'Пока в генерации участвует BunnyMo или CarrotKernel, модели напоминают: проза и листы — по-русски, теги, «SECTION N/M» и «Name» — по-английски, имя — как на карточке. Фоновые запросы (промпт картинки, эмоции, саммари, /gen) идут без замка.',
     },
     {
         key: 'detectors',
         title: 'Детекторы на русском',
-        description: 'Автодетекторы BunnyMo (ревность, паника, флирт…) получают русские ключи и срабатывают только на тексте чата, а не на тексте самого BunnyMo.',
+        description: 'Автодетекторы BunnyMo (ревность, паника, флирт…) получают русские ключи и срабатывают только на тексте чата — не на тексте самого BunnyMo и не на тегах персонажей (<JEALOUSY:POSSESSIVE>).',
     },
     {
         key: 'antiClanker',
@@ -55,7 +56,7 @@ const OPTIONS = [
     {
         key: 'archiveKeys',
         title: 'Ключи архивов со всеми падежами',
-        description: 'Кириллические ключи архивов персонажей («Аня») срабатывают на «Ани», «Аней» и не срабатывают в «Таня».',
+        description: 'Кириллические ключи архивов персонажей («Аня») срабатывают на «Ани», «Аней» и не срабатывают в «Таня». Формы, которые сами — чужие имена («Александра» у Александра, «Яна» у Яна), не берутся.',
     },
     {
         key: 'normalizer',
@@ -92,6 +93,21 @@ const scan = {
 };
 /** Сработал ли BunnyMo в текущей генерации. */
 let activeNow = false;
+/**
+ * Начатые генерации, последняя — в конце: фоновая ли (quiet или пробная сборка промпта — без замка и тегов
+ * сцены) и есть ли у неё quiet_prompt. Генерации вкладываются: расширение может запустить фоновую из
+ * перехватчика обычной, и та начнётся и закончится до сканирования лорбуков обычной.
+ * @type {{ quiet: boolean, prompted: boolean }[]}
+ */
+let generations = [];
+const GENERATIONS_KEPT = 8;
+/** Слот ST с quiet_prompt текущей генерации: ST заполняет его только на время сканирования лорбуков (inject_ids.QUIET_PROMPT). */
+const ST_QUIET_PROMPT_SLOT = 'QUIET_PROMPT';
+/**
+ * Обработчик WORLD_INFO_ACTIVATED в обёртке subscribe: перед каждой генерацией снова ставим его последним.
+ * @type {((...args: any[]) => unknown)|null}
+ */
+let worldInfoHandler = null;
 /** @type {string[]} */
 let unresolved = [];
 let normalizedMessages = 0;
@@ -147,14 +163,16 @@ function onEntriesLoaded(payload) {
     scan.marked = new Set([...repos, ...libraries].filter((world) => entries.some((entry) => entry?.world === world)));
     const worlds = bunnyWorlds();
     scan.vocabulary = packVocabulary(entries.filter((entry) => worlds.has(entry?.world)));
+    const archives = new Set(entries.filter((entry) => repos.has(entry?.world) || isCharacterArchive(entry)));
     scan.stats = patchEntries(lists, {
         detectors: option('detectors'),
         antiClanker: option('antiClanker'),
         archetypes: option('archetypes'),
         archiveKeys: option('archiveKeys'),
     }, BUNNYMO_ENTRIES, {
-        isArchive: (entry) => repos.has(entry?.world) || isCharacterArchive(entry),
-        formsOf: (word) => wordForms(word, { genitive: true }),
+        isArchive: (entry) => archives.has(entry),
+        // Без форм, которые сами — имена: «Александра» не включает архив Александра, «Петрова» — архив Петрова.
+        formsOf: archiveFormsOf((word) => wordForms(word, { genitive: true }), archiveNameWords(archives)),
     });
     const firstTime = !scan.at;
     scan.at = Date.now();
@@ -162,9 +180,13 @@ function onEntriesLoaded(payload) {
     notifyChange();
 }
 
-/** @param {any[]} entryList записи, которые ST включил в этой генерации */
+/**
+ * После сканирования лорбуков, до сборки промпта: ST шлёт событие, только если что-то сработало (и не в пробной
+ * сборке). Обработчик стоит последним — вставки CK к этому моменту уже записаны.
+ * @param {any[]} entryList записи, которые ST включил в этой генерации
+ */
 function onWorldInfoActivated(entryList) {
-    if (!Array.isArray(entryList) || !entryList.length) return;
+    if (scanIsQuiet() || !Array.isArray(entryList) || !entryList.length) return;
     const worlds = bunnyWorlds();
     if (entryList.some((entry) => worlds.has(entry?.world) || isCharacterArchive(entry))) activeNow = true;
     /** @type {Set<string>} */
@@ -177,30 +199,75 @@ function onWorldInfoActivated(entryList) {
         archive.tags.forEach((tag) => tags.add(tag));
     }
     if (tags.size) saveSceneTags({ names, tags: [...tags] });
+    if (lockWanted()) setLanguageLock(LANGUAGE_LOCK_RU);
     notifyChange();
 }
 
 // ─── Вставки ───────────────────────────────────────────────────────────────
 
-/** Языковой замок: значение постоянное, а нужна ли вставка — ST спрашивает у фильтра при сборке промпта. */
-function setLanguageLock() {
-    const { setExtensionPrompt } = getContext();
-    setExtensionPrompt(SLOTS.lock, LANGUAGE_LOCK_RU, PROMPT_POSITION.IN_CHAT, 0, false, PROMPT_ROLE.SYSTEM,
-        () => Boolean(env) && option('languageLock') && (activeNow || hasCkSlots()));
+/**
+ * Идёт ли сейчас сканирование лорбуков фоновой генерации. ST кладёт quiet_prompt генерации в свой слот только на
+ * время сканирования, поэтому сканирование относим к последней начатой генерации, у которой quiet_prompt есть
+ * (или нет) так же: обычная генерация после вложенной фоновой — снова обычная. Генерацию не видели (модуль
+ * включили посреди неё) — фоновая, если у неё есть quiet_prompt.
+ */
+function scanIsQuiet() {
+    const prompted = Boolean(getContext().extensionPrompts?.[ST_QUIET_PROMPT_SLOT]?.value);
+    for (let index = generations.length - 1; index >= 0; index -= 1) {
+        if (generations[index].prompted === prompted) return generations[index].quiet;
+    }
+    return prompted;
 }
 
-/** Теги персонажей прошлой генерации — во вставку, которую ST только сканирует, но не отправляет. */
+/** Замок — запасная проверка: в этой генерации участвуют BunnyMo или вставки CK. */
+function lockWanted() {
+    return Boolean(env) && option('languageLock') && (activeNow || hasCkSlots());
+}
+
+/**
+ * Языковой замок. Фильтр ST 1.19 для вставок в чат не работает (getExtensionPrompt передаёт async-функцию
+ * в Array.filter, и Promise всегда «истина»), поэтому текст лежит в слоте только от сканирования лорбуков
+ * обычной генерации до её конца, а в остальное время слот пуст. Фильтр — запасная проверка для тех мест ST,
+ * где он работает.
+ * @param {string} value
+ */
+function setLanguageLock(value) {
+    const { setExtensionPrompt } = getContext();
+    setExtensionPrompt(SLOTS.lock, value, PROMPT_POSITION.IN_CHAT, 0, false, PROMPT_ROLE.SYSTEM, lockWanted);
+}
+
+/**
+ * Теги персонажей прошлой генерации — во вставку, которую ST только сканирует, но не отправляет. Фоновым
+ * генерациям и пробным сборкам — пусто: фильтр вставок для сканирования ST проверяет в момент сканирования.
+ */
 function setSceneTags() {
     const { setExtensionPrompt } = getContext();
     const entry = sceneTags();
     const value = option('packTags') && entry?.tags.length ? entry.tags.join(' ') : '';
-    setExtensionPrompt(SLOTS.tags, value, PROMPT_POSITION.NONE, 0, true, PROMPT_ROLE.SYSTEM);
+    setExtensionPrompt(SLOTS.tags, value, PROMPT_POSITION.NONE, 0, true, PROMPT_ROLE.SYSTEM,
+        () => Boolean(env) && option('packTags') && !scanIsQuiet());
 }
 
-function onGenerationStarted() {
+/**
+ * Раньше всех: запомнить генерацию, убрать замок до сканирования лорбуков, обновить теги сцены и поставить
+ * обработчик WORLD_INFO_ACTIVATED последним — после CK, который пишет там свою вставку.
+ * @param {string} type тип генерации ST: normal, swipe, regenerate, continue, impersonate, quiet…
+ * @param {{ quiet_prompt?: string }} [options]
+ * @param {boolean} [dryRun] пробная сборка промпта (подсчёт токенов) — модель её не получает
+ */
+function onGenerationStarted(type, options, dryRun) {
+    generations = [...generations, { quiet: type === 'quiet' || dryRun === true, prompted: Boolean(options?.quiet_prompt) }]
+        .slice(-GENERATIONS_KEPT);
     activeNow = false;
-    setLanguageLock();
+    setLanguageLock('');
     setSceneTags();
+    if (worldInfoHandler) getContext().eventSource.makeLast(getContext().eventTypes.WORLD_INFO_ACTIVATED, worldInfoHandler);
+}
+
+/** Генерация закончилась, остановлена или сменился чат: замок не должен попасть в чужую генерацию. */
+function onGenerationOver() {
+    activeNow = false;
+    setLanguageLock('');
 }
 
 function clearSlots() {
@@ -225,7 +292,7 @@ function onMessageReceived(messageId) {
     });
     if (result.unresolved.length) {
         unresolved = [...new Set([...result.unresolved, ...unresolved])].slice(0, UNRESOLVED_LIMIT);
-        log.warn(`BunnyMo: теги не по-английски, паки по ним не сработают: ${result.unresolved.join(' ')}`);
+        log.warn(`BunnyMo: паки по этим тегам не сработают (не по-английски или такого значения нет в подключённых паках): ${result.unresolved.join(' ')}`);
     }
     if (result.text !== before) {
         message.mes = result.text;
@@ -255,6 +322,7 @@ function tagStrippingRegexes() {
  * @param {'on'|'makeFirst'|'makeLast'} method
  * @param {string} event
  * @param {(...args: any[]) => unknown} handler
+ * @returns {(...args: any[]) => unknown} обёртка, под которой обработчик подписан
  */
 function subscribe(method, event, handler) {
     const safe = (...args) => {
@@ -267,6 +335,7 @@ function subscribe(method, event, handler) {
     };
     getContext().eventSource[method](event, safe);
     subscriptions.push([event, safe]);
+    return safe;
 }
 
 // ─── Панель ────────────────────────────────────────────────────────────────
@@ -312,7 +381,7 @@ function mountSection(section) {
             const tags = sceneTags();
             if (tags) lines.push(`Теги сцены для паков (${tags.names.join(', ') || 'без имени'}): ${tags.tags.length}.`);
             if (normalizedMessages) lines.push(`Ответов с исправленным машинным слоем: ${normalizedMessages}.`);
-            if (unresolved.length) lines.push(`Теги не по-английски (паки по ним не сработают): ${unresolved.join(' ')}`);
+            if (unresolved.length) lines.push(`Теги, по которым паки не сработают (не по-английски или такого значения нет в подключённых паках): ${unresolved.join(' ')}`);
         }
         for (const line of lines) list.append(Object.assign(document.createElement('li'), { textContent: line }));
     }
@@ -336,19 +405,24 @@ export default {
     mountSection,
     enable(environment) {
         env = environment;
+        generations = [];
         const { eventTypes } = getContext();
         subscribe('on', eventTypes.WORLDINFO_ENTRIES_LOADED, onEntriesLoaded);
-        subscribe('on', eventTypes.WORLD_INFO_ACTIVATED, onWorldInfoActivated);
-        // Раньше всех: сбросить признак «BunnyMo сработал» и обновить вставки до сканирования лорбуков.
+        // Последним: замок смотрит на вставки CK, а CK пишет их в своём обработчике этого же события.
+        worldInfoHandler = subscribe('makeLast', eventTypes.WORLD_INFO_ACTIVATED, onWorldInfoActivated);
+        // Раньше всех: запомнить генерацию и убрать замок до сканирования лорбуков.
         subscribe('makeFirst', eventTypes.GENERATION_STARTED, onGenerationStarted);
+        subscribe('on', eventTypes.GENERATION_ENDED, onGenerationOver);
+        subscribe('on', eventTypes.GENERATION_STOPPED, onGenerationOver);
         // Раньше DES и CK: они разбирают лист из этого же ответа.
         subscribe('makeFirst', eventTypes.MESSAGE_RECEIVED, onMessageReceived);
         subscribe('on', eventTypes.CHAT_CHANGED, () => {
+            onGenerationOver();
             unresolved = [];
             setSceneTags();
             notifyChange();
         });
-        setLanguageLock();
+        setLanguageLock('');
         setSceneTags();
         notifyChange();
         log.info('Модуль 5 (BunnyMo) включён.');
@@ -357,6 +431,8 @@ export default {
         const { eventSource } = getContext();
         for (const [event, handler] of subscriptions) eventSource.removeListener(event, handler);
         subscriptions = [];
+        worldInfoHandler = null;
+        generations = [];
         clearSlots();
         env = null;
         notifyChange();
@@ -372,7 +448,7 @@ export default {
             notes.push({ level: 'info', text: 'BunnyMo в подключённых к этому чату лорбуках не найден — модулю пока нечего делать.' });
         }
         if (unresolved.length) {
-            notes.push({ level: 'warn', text: `Модель написала теги не по-английски, паки по ним не сработают: ${unresolved.slice(0, 5).join(' ')}${unresolved.length > 5 ? '…' : ''}` });
+            notes.push({ level: 'warn', text: `Паки не сработают по тегам из ответов (не по-английски или такого значения нет в подключённых паках): ${unresolved.slice(0, 5).join(' ')}${unresolved.length > 5 ? '…' : ''}` });
         }
         return notes;
     },

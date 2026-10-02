@@ -37,11 +37,16 @@ export function findCharacter(entries, name, activeSources = new Set()) {
 
 /** Короче — нельзя: CK ищет триггер подстрокой, и «ани» нашлось бы в «знания». */
 const MIN_RAG_TRIGGER = 5;
+/** Имя не длиннее — творительный падеж не дописываем. */
+const SHORT_NAME = 4;
+/** Творительный падеж: у коротких имён это конец обычных слов — «никой» в «паникой», «линой» в «длиной», «розой» в «грозой». */
+const INSTRUMENTAL_END = /(?:ой|ою|ей|ею)$/;
 
 /**
  * Падежные формы имени для триггеров RAG CK. CK включает коллекцию листа, только если триггер — подстрока
  * последних сообщений, поэтому лист «Шарлотта» не находится по «с Шарлоттой». Берём первое слово имени —
- * так персонажа зовут в тексте; «ё» и «е» — оба написания; формы короче пяти букв пропускаем.
+ * так персонажа зовут в тексте; «ё» и «е» — оба написания; формы короче пяти букв пропускаем, у имён
+ * из четырёх букв и короче — и творительный падеж.
  * @param {unknown} name
  * @param {(word: string) => string[]} formsOf формы слова вместе с ним самим
  * @returns {string[]} формы в нижнем регистре, без самого слова
@@ -51,7 +56,8 @@ export function ragTriggerForms(name, formsOf) {
     if (!first || !/\p{Script=Cyrillic}/u.test(first)) return [];
     const forms = new Set([...formsOf(first), ...formsOf(first.replace(/ё/g, 'е'))]);
     forms.delete(first);
-    return [...forms].filter((form) => form.length >= MIN_RAG_TRIGGER && !form.includes(first));
+    const short = first.length <= SHORT_NAME;
+    return [...forms].filter((form) => form.length >= MIN_RAG_TRIGGER && !form.includes(first) && !(short && INSTRUMENTAL_END.test(form)));
 }
 
 /**

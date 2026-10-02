@@ -11,6 +11,12 @@ const SYLLABLES = Object.freeze([
     ['ый', ['y', 'yi', 'iy']], ['ье', ['ye', 'ie', 'e']], ['ьи', ['yi', 'i']], ['ья', ['ya', 'ia', 'ja']], ['ью', ['yu', 'iu', 'ju']],
 ]);
 
+/**
+ * Буквы, у которых в начале слова вариантов меньше. «З» внутри слова бывает и «s» (Лиза — Lisa, Роза — Rosa,
+ * Изабелла — Isabella), а в начале — только «z»: Зара — Zara, но не Sara (это Сара).
+ */
+const INITIAL_LETTERS = Object.freeze({ з: ['z'] });
+
 /** Варианты латиницы для одиночных букв. */
 const LETTERS = Object.freeze({
     а: ['a'], б: ['b'], в: ['v', 'w'], г: ['g', 'gh'], д: ['d'], е: ['e', 'ye', 'ie'], ё: ['yo', 'io', 'e', 'jo'],
@@ -57,7 +63,7 @@ export function translitMatches(cyrillic, latin) {
             if (ok) break;
         }
         if (!ok) {
-            const options = LETTERS[source[i]] ?? [source[i]];
+            const options = (i === 0 ? INITIAL_LETTERS[source[i]] : null) ?? LETTERS[source[i]] ?? [source[i]];
             ok = options.some((option) => target.startsWith(option, j) && step(i + 1, j + option.length));
         }
         memo.set(key, ok);

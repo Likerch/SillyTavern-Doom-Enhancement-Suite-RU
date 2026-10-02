@@ -42,7 +42,9 @@ const translator = createTranslator({
     id: 'des',
     ui: DES_UI,
     userDictionary: () => moduleSettings().userDictionary,
-    options: () => ({ toasts: option('toasts'), collect: option('collect'), collectToasts: option('collect') }),
+    // Уведомления общие на всю страницу: в них имена чатов и файлов и ошибки API других расширений.
+    // В выгрузку для словаря их не собираем — строки уведомлений DES и так есть в его коде.
+    options: () => ({ toasts: option('toasts'), collect: option('collect'), collectToasts: false }),
     onCollect: notifyChange,
 });
 

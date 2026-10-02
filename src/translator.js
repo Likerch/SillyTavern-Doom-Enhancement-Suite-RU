@@ -14,6 +14,7 @@
  * - Уведомления (toastr) — общие на всех: их переводит первый словарь, в котором нашлась строка.
  */
 import { OWN_TOAST_CLASS } from './st.js';
+import { log } from './log.js';
 import { createDictionary, looksTranslatable, normalizeText } from './lib/dictionary.js';
 
 /** Инлайн-теги, из которых состоят подсказки; иконки Font Awesome форматированием не считаются. */
@@ -21,6 +22,22 @@ const INLINE_TAGS = new Set(['CODE', 'STRONG', 'EM', 'B', 'I', 'U', 'BR', 'SMALL
 const RUN_CLASS = 'desru-run';
 /** Поля ввода: значение — данные, но подсказки на них (placeholder, title) — интерфейс. */
 const FORM_FIELD = 'input, textarea';
+/** Больше непереведённых строк не копим: список для словаря, а не журнал. */
+const UNTRANSLATED_LIMIT = 2000;
+
+/**
+ * Понимает ли браузер селектор. Один непонятный (например, `:has()` в старом браузере) ломает весь
+ * список через запятую — и с ним перевод целиком.
+ * @param {string} selector
+ */
+function isSupportedSelector(selector) {
+    try {
+        document.createDocumentFragment().querySelector(selector);
+        return true;
+    } catch {
+        return false;
+    }
+}
 
 /**
  * @typedef {{ selector: string, mode: 'full'|'chrome' }} RootConfig
@@ -78,6 +95,12 @@ function translateToast(toast) {
 /** @param {Element} container */
 function observeToasts(container) {
     if (toastObservers.has(container)) return;
+    // toastr удаляет контейнер после последнего уведомления и создаёт новый — старые наблюдатели не нужны.
+    for (const [known, observer] of toastObservers) {
+        if (known.isConnected) continue;
+        observer.disconnect();
+        toastObservers.delete(known);
+    }
     container.querySelectorAll('.toast').forEach(translateToast);
     const observer = new MutationObserver((records) => {
         for (const record of records) {
@@ -183,13 +206,22 @@ function wrapInlineRuns(element) {
  * @param {() => void} [config.onCollect] появилась новая непереведённая строка
  */
 export function createTranslator({ id, ui, userDictionary: getUserDictionary, options, onCollect = () => {} }) {
-    const ROOT_SELECTOR = ui.roots.map((root) => root.selector).join(', ') || ':not(*)';
-    const CHAT_ROOT_SELECTOR = ui.chatRoots.map((root) => root.selector).join(', ') || ':not(*)';
-    const CHROME_SELECTOR = ui.chrome.join(', ') || ':not(*)';
-    const EXCLUDE_SELECTOR = ui.exclude.join(', ') || ':not(*)';
-    const NO_COLLECT_SELECTOR = ui.noCollect.join(', ') || ':not(*)';
-    const USER_ONLY_SELECTOR = ui.userOnly.join(', ') || ':not(*)';
-    const DATA_ATTRIBUTE_SELECTOR = ui.dataAttributes.join(', ') || ':not(*)';
+    /** @type {string[]} */
+    const unsupported = [];
+    /** @param {readonly string[]} list */
+    const selectorList = (list) => list.filter((selector) => {
+        if (isSupportedSelector(selector)) return true;
+        unsupported.push(selector);
+        return false;
+    }).join(', ') || ':not(*)';
+    const ROOT_SELECTOR = selectorList(ui.roots.map((root) => root.selector));
+    const CHAT_ROOT_SELECTOR = selectorList(ui.chatRoots.map((root) => root.selector));
+    const CHROME_SELECTOR = selectorList(ui.chrome);
+    const EXCLUDE_SELECTOR = selectorList(ui.exclude);
+    const NO_COLLECT_SELECTOR = selectorList(ui.noCollect);
+    const USER_ONLY_SELECTOR = selectorList(ui.userOnly);
+    const DATA_ATTRIBUTE_SELECTOR = selectorList(ui.dataAttributes);
+    if (unsupported.length) log.warn(`Перевод (${id}): браузер не понимает селекторы ${unsupported.join(' · ')} — они пропущены.`);
     const OBSERVE_ROOT = { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: [...ui.attributes] };
     const DRAWER_CONFIG = Object.freeze({ selector: 'drawer', mode: 'full' });
     const CHAT_CONFIG = new Map(ui.chatRoots.map((root) => [root.selector, root]));
@@ -216,6 +248,8 @@ export function createTranslator({ id, ui, userDictionary: getUserDictionary, op
     let observedChat = null;
     /** @type {Map<string, { kind: string, where: string, count: number }>} */
     const untranslated = new Map();
+    /** @type {Set<Element>} содержимое переведённых попапов ST — чтобы вернуть английский при выключении */
+    const popups = new Set();
 
     // ─── Словарь ───────────────────────────────────────────────────────────
 
@@ -257,6 +291,7 @@ export function createTranslator({ id, ui, userDictionary: getUserDictionary, op
             entry.count += 1;
             return;
         }
+        if (untranslated.size >= UNTRANSLATED_LIMIT) return;
         untranslated.set(key, { kind, where: describeRoot(where), count: 1 });
         onCollect();
     }
@@ -308,6 +343,9 @@ export function createTranslator({ id, ui, userDictionary: getUserDictionary, op
             const source = state && current === state.value ? state.source : current;
             const translation = dictionaryFor(context).text(source);
             if (translation === null) {
+                // Перевод убрали из словаря — возвращаем исходник, как у текстовых узлов.
+                if (state && current === state.value) element.setAttribute(name, state.source);
+                states?.delete(name);
                 if (!context.noCollect && !context.userOnly) collect(source, 'attribute', element);
                 continue;
             }
@@ -423,7 +461,6 @@ export function createTranslator({ id, ui, userDictionary: getUserDictionary, op
                 return;
             }
             if (node.nodeType !== Node.ELEMENT_NODE) return;
-            if (element.matches(CHROME_SELECTOR)) visit(element, contextFromAncestors(element));
             for (const chrome of element.querySelectorAll(CHROME_SELECTOR)) visit(chrome, contextFromAncestors(chrome));
             return;
         }
@@ -494,6 +531,8 @@ export function createTranslator({ id, ui, userDictionary: getUserDictionary, op
             if (toggle) attachRoot(ui.drawer.rootOf(toggle), DRAWER_CONFIG);
         }
         if (element.matches(ui.toastContainer)) observeToasts(element);
+        // Попап ST сразу заводит у себя свой контейнер уведомлений — он приходит уже внутри попапа.
+        element.querySelectorAll(ui.toastContainer).forEach(observeToasts);
         if (element.matches(ui.stPopup)) translatePopup(element);
     }
 
@@ -561,7 +600,10 @@ export function createTranslator({ id, ui, userDictionary: getUserDictionary, op
     /** Попап ST с текстом расширения: переводим только то, что есть в словаре. */
     function translatePopup(popup) {
         const content = popup.querySelector(ui.stPopupContent);
-        if (content) visit(content, { noCollect: true, userOnly: false });
+        if (!content) return;
+        for (const known of popups) if (!known.isConnected) popups.delete(known);
+        popups.add(content);
+        visit(content, { noCollect: true, userOnly: false });
     }
 
     function scanDocument() {
@@ -601,10 +643,11 @@ export function createTranslator({ id, ui, userDictionary: getUserDictionary, op
         document.head.append(style);
     }
 
-    /** Возвращает английский во всех узлах, которые мы перевели. */
+    /** Возвращает английский во всех узлах, которые мы перевели, и снимает наши обёртки. */
     function restoreAll() {
-        const elements = new Set([...roots.keys()]);
+        const elements = new Set([...roots.keys(), ...popups]);
         document.querySelector(ui.chat)?.querySelectorAll(CHAT_ROOT_SELECTOR).forEach((root) => elements.add(root));
+        popups.clear();
         for (const root of elements) {
             if (!root.isConnected) continue;
             const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
@@ -623,6 +666,7 @@ export function createTranslator({ id, ui, userDictionary: getUserDictionary, op
                     if (element.getAttribute(name) === state.value) element.setAttribute(name, state.source);
                 }
             }
+            for (const wrapper of root.querySelectorAll(`span.${RUN_CLASS}`)) wrapper.replaceWith(...wrapper.childNodes);
         }
     }
 

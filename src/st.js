@@ -110,7 +110,8 @@ export const OWN_TOAST_CLASS = 'desru-toast';
  */
 export function notify(kind, message, options = {}) {
     const toastClass = `${toastr.options?.toastClass ?? 'toast'} ${OWN_TOAST_CLASS}`;
-    toastr[kind](message, 'DES — RU', { ...options, toastClass });
+    // В наших уведомлениях бывают имена, которые написала модель: только текстом, даже если кто-то сменил настройку toastr.
+    toastr[kind](message, 'DES — RU', { escapeHtml: true, ...options, toastClass });
 }
 
 /**

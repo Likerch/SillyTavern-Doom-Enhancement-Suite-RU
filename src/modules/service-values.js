@@ -13,7 +13,7 @@
 import { getContext, notify } from '../st.js';
 import { log } from '../log.js';
 import { getSettings, saveSettings } from '../settings.js';
-import { DES_KEYS, DES_WEATHER, desForecastField, desHourOf, desTimeField, desWeatherTypeOf, importDesModuleEarly } from '../des-adapter.js';
+import { DES_KEYS, DES_MODE_NAMES, DES_WEATHER, desForecastField, desHourOf, desTimeField, desWeatherTypeOf, importDesModuleEarly } from '../des-adapter.js';
 import { DEFAULT_WEATHER_WORDS, addWeatherWords, normalizeWeatherWords, sameWeatherWords } from '../lib/weather-words.js';
 import { TIME_INSTRUCTION_RU, TIME_PLACEHOLDER_RU, WEATHER_INSTRUCTION_RU, replaceExact } from '../lib/service-prompt.js';
 import { copyText, menuButton } from '../ui.js';
@@ -23,8 +23,6 @@ const EFFECT_NAMES = Object.freeze({
     blizzard: 'метель', storm: 'гроза', wind: 'ветер', snow: 'снег', rain: 'дождь', mist: 'туман',
     sunny: 'ясно', none: 'без эффекта',
 });
-/** Подписи режимов генерации — как в настройках DES. */
-const MODE_NAMES = Object.freeze({ together: 'Вместе с ответом', separate: 'Отдельным запросом', external: 'Внешний API' });
 /** В группу `none` дописывать бессмысленно: она проверяется последней. */
 const EDITABLE_TYPES = DES_WEATHER.types.filter((type) => type !== 'none');
 
@@ -353,7 +351,7 @@ export default {
         }
         const mode = env.des.generationMode();
         if (mode !== DES_KEYS.togetherMode && (option('weatherPrompt') || option('timePrompt'))) {
-            notes.push({ level: 'warn', text: `Режим генерации DES — «${MODE_NAMES[mode] ?? mode}»: подсказки модели в этом режиме не доходят. Готовый текст для редактора промптов DES — в разделе «Погода и служебные значения».` });
+            notes.push({ level: 'warn', text: `Режим генерации DES — «${DES_MODE_NAMES[mode] ?? mode}»: подсказки модели в этом режиме не доходят. Готовый текст для редактора промптов DES — в разделе «Погода и служебные значения».` });
         }
         if (option('weatherPrompt') && weather.customInstruction()) {
             notes.push({ level: 'info', text: 'В редакторе промптов DES задана своя «Инструкция для погоды» — её не трогаем.' });

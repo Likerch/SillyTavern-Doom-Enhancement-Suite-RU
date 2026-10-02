@@ -7,9 +7,12 @@
 //   - подписи «**Имя:**» → «**Name:**», «Титул персонажа:» → «Character Title:» — только в листах;
 //   - теги <ВИД:Эльф> → <SPECIES:ELF>: русский ключ → английский, русское значение → английское по словарю
 //     или транслитом по словарю паков; <Name:Аней> → имя карточки;
-//   - обёртки <ЛИЧНОСТЬ>…</ЛИЧНОСТЬ> → <PERSONALITY>…</PERSONALITY>;
+//   - обёртки <ЛИЧНОСТЬ>…</ЛИЧНОСТЬ> → <PERSONALITY>…</PERSONALITY> — только внутри блока <BunnymoTags>:
+//     в прозе «вкладку <Характер>» после замены на <PERSONALITY> слово пропало бы (HTML-тег ST вырезает);
 //   - закрывающий </bunnymotags> в другом регистре, чем открывающий, — к регистру открывающего
 //     (CarrotKernel иначе не найдёт блок тегов).
+// Листом считается текст с заголовками SECTION N/M или с блоком <BunnymoTags>, где есть теги <KEY:VALUE>;
+// дамп CarrotKernel (<BunnyMoTags> со строками «Имя:» и «• КАТЕГОРИЯ: …») листом не делает.
 
 import { TAG_KEYS_RU, VALUES_RU, WRAPPERS_RU } from './bunnymo-vocab.js';
 import { translitMatches } from './translit.js';
@@ -22,12 +25,19 @@ const VALUE_DICTIONARY_OF = Object.freeze({ MENTAL: 'BSM', MOOD: 'BSM', PERSONAL
 /** Английские ключи, которые знает словарь: только у них пробелы в значении заменяются на «_». */
 const KNOWN_KEYS = new Set([...Object.values(TAG_KEYS_RU).map((key) => key.toUpperCase()), 'MBTI', 'NSFW', 'DIVINE', 'DOMAIN', 'BENDER', 'MENTAL']);
 const ADJECTIVE_END = /(?:ого|его|ому|ему|ыми|ими|ый|ий|ой|ая|яя|ое|ее|ые|ие|ых|их|ую|юю|ым|им|ом|ем)$/;
+/** Английский суффикс: «близкое» значение пака — то же слово с другим суффиксом (HEDONIST ↔ HEDONISTIC). */
+const ENGLISH_SUFFIX = /(?:ISTIC|ICAL|ISM|IST|NESS|ING|IC|LY|ED|ER|AL|OUS|IVE|Y|S)$/;
 
 const TAG_RE = /<([\p{L}][\p{L}\p{N}_ ]{0,39}):([^<>\n]{1,80})>/gu;
+const TAG_TEST_RE = new RegExp(TAG_RE.source, 'u');
 const WRAPPER_RE = /<(\/?)([\p{L}][\p{L}_ ]{1,40})>/gu;
+const BLOCK_RE = /<bunnymotags>([\s\S]*?)<\/bunnymotags>/gi;
 const BLOCK_OPEN_RE = /<bunnymotags>/gi;
 const BLOCK_CLOSE_RE = /<\/bunnymotags>/gi;
 const HEADER_RE = /^([ \t]*(?:<details[^>]*>\s*)?(<summary[^>]*>)?[ \t]*(#{1,3})?[ \t]*(\*\*)?[ \t]*(?:[^\s\p{L}\p{N}]{1,8}[ \t]*)?)(раздел|секция|section)[ \t]+(\d{1,3})[ \t]*(?:из|\/|／|of)[ \t]*(\d{1,3})[ \t]*(:?)/gimu;
+/** Двоеточие после закрывающей разметки заголовка: «**Раздел 3 из 8**: Связи». */
+const COLON_AFTER_MARKUP_RE = /^[ \t]*(?:\*{1,2}|_{1,2})[ \t]*:/;
+const SECTION_LINE_RE = /^\s*(?:<summary[^>]*>)?\s*#{0,3}.*?SECTION\s+\d+\/\d+(?::|[ \t]*(?:\*{1,2}|_{1,2})[ \t]*:)/m;
 
 /** @param {string} text */
 const keyToken = (text) => String(text).trim().toUpperCase().replace(/Ё/g, 'Е').replace(/[\s-]+/g, '_');
@@ -41,27 +51,54 @@ const valueToken = (text) => String(text).trim().toLowerCase().replace(/ё/g, '�
  */
 
 /**
+ * Значение пака, которое отличается от английского только суффиксом (HEDONIST ↔ HEDONISTIC, OBSESSIVE ↔ OBSESSED).
+ * Синонимы и похожие написания не ищем: CARING ↔ UNCARING, IMPATIENT ↔ PATIENT — противоположности.
+ * @param {string} english
+ * @param {ReadonlySet<string>} known
+ */
+function sameStemValue(english, known) {
+    const stem = english.replace(ENGLISH_SUFFIX, '');
+    if (stem.length < 4) return null;
+    for (const candidate of known) {
+        if (candidate.replace(ENGLISH_SUFFIX, '') === stem) return candidate;
+    }
+    return null;
+}
+
+/**
+ * Английское значение для русского значения тега.
+ * `inPacks: false` — значение нашлось только в словаре, а паки с этим ключом в сканировании есть и такого
+ * значения не знают: тег английский, но паки по нему не сработают. Паков с этим ключом нет — верим словарю.
+ * @param {string} key английский ключ в верхнем регистре
+ * @param {string} value
+ * @param {ReadonlyMap<string, ReadonlySet<string>>} [vocabulary]
+ * @returns {{ value: string|null, inPacks: boolean }}
+ */
+export function translateValue(key, value, vocabulary) {
+    const token = valueToken(value);
+    if (!token) return { value: null, inPacks: false };
+    const dictionary = VALUES_RU[VALUE_DICTIONARY_OF[key] ?? key];
+    const direct = dictionary ? dictionary[token] ?? dictionary[token.replace(ADJECTIVE_END, '')] ?? null : null;
+    const known = vocabulary?.get(key);
+    if (!known?.size) return { value: direct, inPacks: Boolean(direct) };
+    if (direct && known.has(direct)) return { value: direct, inPacks: true };
+    const plain = token.replace(/_/g, '');
+    for (const candidate of known) {
+        if (translitMatches(plain, candidate.toLowerCase().replace(/_/g, ''))) return { value: candidate, inPacks: true };
+    }
+    const near = direct ? sameStemValue(direct, known) : null;
+    if (near) return { value: near, inPacks: true };
+    return { value: direct, inPacks: false };
+}
+
+/**
  * Английское значение для русского значения тега; `null` — не нашлось.
  * @param {string} key английский ключ в верхнем регистре
  * @param {string} value
  * @param {ReadonlyMap<string, ReadonlySet<string>>} [vocabulary]
  */
 export function resolveValue(key, value, vocabulary) {
-    const token = valueToken(value);
-    if (!token) return null;
-    const dictionary = VALUES_RU[VALUE_DICTIONARY_OF[key] ?? key];
-    if (dictionary) {
-        const direct = dictionary[token] ?? dictionary[token.replace(ADJECTIVE_END, '')];
-        if (direct) return direct;
-    }
-    const known = vocabulary?.get(key);
-    if (known) {
-        const plain = token.replace(/_/g, '');
-        for (const candidate of known) {
-            if (translitMatches(plain, candidate.toLowerCase().replace(/_/g, ''))) return candidate;
-        }
-    }
-    return null;
+    return translateValue(key, value, vocabulary).value;
 }
 
 /**
@@ -75,18 +112,30 @@ export function normalizeMachineLayer(text, { vocabulary, canonicalName } = {}) 
     const unresolved = [];
     let result = text;
 
+    // 0. Название блока тегов по-русски (<БанниМоТеги>) — в прозе такого не бывает, меняем везде.
+    result = result.replace(WRAPPER_RE, (whole, slash, name) => {
+        const mapped = CYRILLIC.test(name) ? WRAPPERS_RU[keyToken(name)] : null;
+        if (mapped !== 'BunnymoTags') return whole;
+        changes.push(`${whole} → <${slash}${mapped}>`);
+        return `<${slash}${mapped}>`;
+    });
+
     // 1. Заголовки разделов. Без разметки (#, **, <summary>) заголовком считаем только «лесенку»:
     //    хотя бы два раздела с одним и тем же M — так «Часть 1 из 3» в прозе не тронется.
     const ladders = new Map();
     for (const match of result.matchAll(HEADER_RE)) ladders.set(match[7], (ladders.get(match[7]) ?? 0) + 1);
-    result = result.replace(HEADER_RE, (whole, prefix, summary, hashes, bold, word, n, m, colon) => {
+    result = result.replace(HEADER_RE, (whole, prefix, summary, hashes, bold, word, n, m, colon, offset, source) => {
         const structural = Boolean(summary || hashes || bold);
         if (!structural && (ladders.get(m) ?? 0) < 2) return whole;
-        if (word === 'SECTION' && colon && whole.includes(`${n}/${m}`)) return whole;
-        changes.push(`«${whole.trim()}» → «SECTION ${n}/${m}:»`);
-        return `${prefix}SECTION ${n}/${m}:`;
+        // «**Раздел 3 из 8**: Связи» — двоеточие уже стоит после «**», второе не ставим.
+        const tail = colon || !COLON_AFTER_MARKUP_RE.test(source.slice(offset + whole.length)) ? ':' : '';
+        const fixed = `${prefix}SECTION ${n}/${m}${tail}`;
+        if (fixed === whole) return whole;
+        changes.push(`«${whole.trim()}» → «SECTION ${n}/${m}${tail}»`);
+        return fixed;
     });
-    const isSheet = /^\s*(?:<summary[^>]*>)?\s*#{0,3}.*?SECTION\s+\d+\/\d+:/m.test(result) || /<bunnymotags>/i.test(result);
+    const hasSections = SECTION_LINE_RE.test(result);
+    const isSheet = hasSections || [...result.matchAll(BLOCK_RE)].some((block) => TAG_TEST_RE.test(block[1]));
 
     // 2. Подписи листа, по которым DES находит имя и титул.
     if (isSheet) {
@@ -94,10 +143,12 @@ export function normalizeMachineLayer(text, { vocabulary, canonicalName } = {}) 
         result = result
             .replace(/\*\*\s*Имя\s*:\s*\*\*/g, '**Name:**')
             .replace(/\*\*\s*Имя\s*\*\*\s*:/g, '**Name:**');
-        const firstSection = result.search(/SECTION\s+\d+\/\d+:/);
-        const head = firstSection >= 0 ? result.slice(0, firstSection) : result;
-        const fixedHead = head.replace(/(Титул персонажа|Звание персонажа|Титул)(\s*):/g, 'Character Title$2:');
-        result = fixedHead + result.slice(head.length);
+        // Титул DES ищет перед первым разделом; без разделов «Титул: граф» — скорее проза.
+        const firstSection = hasSections ? result.search(/SECTION\s+\d+\/\d+/) : -1;
+        if (firstSection >= 0) {
+            const head = result.slice(0, firstSection).replace(/(Титул персонажа|Звание персонажа|Титул)(\s*):/g, 'Character Title$2:');
+            result = head + result.slice(firstSection);
+        }
         if (result !== before) changes.push('подписи листа «Имя», «Титул» → «Name», «Character Title»');
         if (canonicalName) {
             result = result.replace(/(\*\*Name:\*\*[ \t]*)([^\n]+)/g, (whole, label, value) => {
@@ -116,7 +167,7 @@ export function normalizeMachineLayer(text, { vocabulary, canonicalName } = {}) 
         const token = keyToken(key);
         return KNOWN_KEYS.has(token) || Boolean(TAG_KEYS_RU[token]);
     }).length;
-    const machine = isSheet || /<банн?имо_?теги>/i.test(result) || knownTags >= 2;
+    const machine = isSheet || knownTags >= 2;
     if (machine) result = result.replace(TAG_RE, (whole, rawKey, rawValue) => {
         let key = rawKey.trim();
         if (CYRILLIC.test(key)) {
@@ -134,9 +185,10 @@ export function normalizeMachineLayer(text, { vocabulary, canonicalName } = {}) 
             const canonical = canonicalName?.(value.replace(/_/g, ' ')) ?? null;
             if (canonical && canonical !== value) value = canonical;
         } else if (CYRILLIC.test(value)) {
-            const english = resolveValue(upper, value, vocabulary);
-            if (english) value = english;
-            else unresolved.push(`<${key}:${value}>`);
+            const english = translateValue(upper, value, vocabulary);
+            if (english.value) value = english.value;
+            // Не перевели — или перевели, но такого значения нет ни в одном подключённом паке.
+            if (!english.inPacks) unresolved.push(`<${key}:${value}>`);
         } else if (KNOWN_KEYS.has(upper) && /^[A-Za-z]+(?: +[A-Za-z]+)+$/.test(value)) {
             value = value.replace(/ +/g, '_');
         }
@@ -145,14 +197,14 @@ export function normalizeMachineLayer(text, { vocabulary, canonicalName } = {}) 
         return rebuilt;
     });
 
-    // 4. Обёртки блоков.
-    result = result.replace(WRAPPER_RE, (whole, slash, name) => {
+    // 4. Обёртки блоков — только внутри <BunnymoTags>…</BunnymoTags>.
+    result = result.replace(BLOCK_RE, (block) => block.replace(WRAPPER_RE, (whole, slash, name) => {
         if (!CYRILLIC.test(name)) return whole;
         const mapped = WRAPPERS_RU[keyToken(name)];
         if (!mapped) return whole;
         changes.push(`${whole} → <${slash}${mapped}>`);
         return `<${slash}${mapped}>`;
-    });
+    }));
 
     // 5. Регистр закрывающего </BunnymoTags> — как у открывающего.
     const opens = [...result.matchAll(BLOCK_OPEN_RE)];

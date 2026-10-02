@@ -12,7 +12,7 @@
  */
 import { getContext } from '../st.js';
 import { log } from '../log.js';
-import { DES_KEYS, DES_TIMING, DES_VALUES, desDetailKey, desSceneFieldKey, hasDesOffSceneMarker } from '../des-adapter.js';
+import { DES_KEYS, DES_MODE_NAMES, DES_TIMING, DES_VALUES, desDetailKey, desSceneFieldKey, hasDesOffSceneMarker } from '../des-adapter.js';
 import { restoreDetailKeys } from '../lib/field-keys.js';
 import { findRussianOffScene, isRussianNoQuest } from '../lib/russian-markers.js';
 import { markOffScene, normalizeNoQuest } from '../lib/tracker-fixes.js';
@@ -214,7 +214,8 @@ function showHiddenTranslations() {
     logOnce('translations:ok', 'info', 'Исправления: переводы встроенного переводчика защищены от очистки DES.');
     if (job.frames > LONG_HIDE_FRAMES) {
         // В длинном чате окно скрытия дольше отложенного сохранения: сохраняем, чтобы переводы точно были в файле.
-        Promise.resolve(getContext().saveChatConditional?.()).catch((error) => log.warn('Исправления: не удалось пересохранить чат', error));
+        // saveChat в контексте ST — это saveChatConditional (st-context.js).
+        Promise.resolve(getContext().saveChat?.()).catch((error) => log.warn('Исправления: не удалось пересохранить чат', error));
     }
 }
 
@@ -266,9 +267,10 @@ export default {
         const notes = [];
         const fields = cyrillicCharacterFields();
         if (option('fieldKeys') && fields.length) {
+            const mode = env.des.generationMode();
             notes.push(isTogetherMode()
                 ? { level: 'info', text: `Поля персонажа ${quoteList(fields)}: названия возвращаются в шаблон трекера.` }
-                : { level: 'warn', text: `Режим генерации DES — «${env.des.generationMode()}»: поля ${quoteList(fields)} исправляются только в режиме together. В других режимах назови их латиницей.` });
+                : { level: 'warn', text: `Режим генерации DES — «${DES_MODE_NAMES[mode] ?? mode}»: поля ${quoteList(fields)} исправляются только в режиме «${DES_MODE_NAMES.together}». В других режимах назови их латиницей.` });
         }
         const sceneFields = env.des.sceneFields().map((field) => String(field.name)).filter((name) => desSceneFieldKey(name) === '');
         if (sceneFields.length) {

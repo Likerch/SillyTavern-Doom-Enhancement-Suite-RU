@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractTags, normalizeMachineLayer, resolveValue } from '../src/lib/bunnymo-normalize.js';
+import { extractTags, normalizeMachineLayer, resolveValue, translateValue } from '../src/lib/bunnymo-normalize.js';
 
 const vocabulary = new Map([
     ['DERE', new Set(['TSUNDERE', 'KUUDERE', 'YANDERE'])],
@@ -71,6 +71,50 @@ test('values resolve by dictionary, adjective stem and transliteration', () => {
     assert.equal(resolveValue('DERE', 'яндэрэ', vocabulary), 'YANDERE');
     assert.equal(resolveValue('MENTAL', 'депрессия'), 'DEPRESSION');
     assert.equal(resolveValue('SPECIES', 'Кракозябра', vocabulary), null);
+});
+
+test('Russian pseudo-tags in prose keep their words', () => {
+    // <PERSONALITY> ST вырезал бы как HTML-тег — слово пропало бы из сообщения навсегда.
+    for (const prose of [
+        'Она открыла вкладку <Характер> и вздохнула. Потом — <Здоровье>: 80/100.',
+        '«Статус»\n<Внешность> обычная\n<Психическое здоровье> шаткое',
+    ]) {
+        assert.deepEqual(normalizeMachineLayer(prose), { text: prose, changes: [], unresolved: [] });
+    }
+});
+
+test('wrappers are fixed inside the tag block, also when the block name is Russian', () => {
+    const { text } = normalizeMachineLayer('Вкладка <Характер>.\n<БанниМо Теги><ЛИЧНОСТЬ><ЧЕРТА:спокойная></ЛИЧНОСТЬ></БанниМо Теги>');
+    assert.equal(text, 'Вкладка <Характер>.\n<BunnymoTags><PERSONALITY><TRAIT:CALM></PERSONALITY></BunnymoTags>');
+});
+
+test('a CarrotKernel dump does not make a reply a sheet', () => {
+    const reply = 'Он сказал: «Мой титул: граф». Титул: граф Дракула.\n\n<BunnyMoTags>\nАня:\n\n</BunnyMoTags>';
+    assert.equal(normalizeMachineLayer(reply).text, reply);
+    const dumpWithTags = 'Титул: граф. <Вид: усталый>\n\n<BunnyMoTags>\nАня:\n• SPECIES: HUMAN\n</BunnyMoTags>';
+    assert.equal(normalizeMachineLayer(dumpWithTags).text, dumpWithTags, 'a lone pseudo-tag in prose stays as well');
+    // Лист без разделов — только блок тегов: имя чинится, «Титул» в прозе — нет.
+    const tagSheet = 'Титул: граф.\n<BunnymoTags><Name:Аней>, <SPECIES:HUMAN></BunnymoTags>';
+    const { text } = normalizeMachineLayer(tagSheet, { canonicalName: (name) => (name === 'Аней' ? 'Аня' : null) });
+    assert.equal(text, 'Титул: граф.\n<BunnymoTags><Name:Аня>, <SPECIES:HUMAN></BunnymoTags>');
+});
+
+test('a colon after the closing ** is not doubled', () => {
+    assert.equal(normalizeMachineLayer('**Раздел 3 из 8**: Связи\n**Раздел 4 из 8**: Прошлое').text, '**SECTION 3/8**: Связи\n**SECTION 4/8**: Прошлое');
+    assert.equal(normalizeMachineLayer('**SECTION 3/8**: Связи').changes.length, 0);
+});
+
+test('a dictionary value no connected pack keys on is reported, a same-stem pack value is used', () => {
+    const packs = new Map([['TRAIT', new Set(['INTELLECTUAL', 'CALM', 'HEDONISTIC', 'COWARDLY'])]]);
+    assert.deepEqual(translateValue('TRAIT', 'умная', packs), { value: 'INTELLECTUAL', inPacks: true });
+    assert.deepEqual(translateValue('TRAIT', 'хитрая', packs), { value: 'CUNNING', inPacks: false });
+    assert.deepEqual(translateValue('TRAIT', 'хитрая'), { value: 'CUNNING', inPacks: true }, 'no TRAIT pack connected: trust the dictionary');
+    const nearPacks = new Map([['TRAIT', new Set(['OBSESSED', 'UNCARING'])]]);
+    assert.deepEqual(translateValue('TRAIT', 'одержимая', nearPacks), { value: 'OBSESSED', inPacks: true }, 'OBSESSIVE ↔ OBSESSED');
+    assert.deepEqual(translateValue('TRAIT', 'заботливая', nearPacks), { value: 'CARING', inPacks: false }, 'never UNCARING');
+    const { text, unresolved } = normalizeMachineLayer('<BunnymoTags><Name:Аня>, <ЧЕРТА:хитрая>, <ЧЕРТА:спокойная></BunnymoTags>', { vocabulary: packs });
+    assert.equal(text, '<BunnymoTags><Name:Аня>, <TRAIT:CUNNING>, <TRAIT:CALM></BunnymoTags>');
+    assert.deepEqual(unresolved, ['<TRAIT:CUNNING>']);
 });
 
 test('tags are extracted from BunnymoTags blocks only', () => {

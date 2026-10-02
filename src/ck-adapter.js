@@ -28,11 +28,12 @@ export const CK_SELECTORS = Object.freeze({
  * ES-модули CK. Оба статически импортируются его index.js, поэтому мы получаем те же экземпляры.
  * Ничего в них не заменяем, кроме функции поиска персонажа у генератора листов — её CK сам
  * передаёт через initializeSheetGenerator и разрешает переопределять.
+ * Здесь только то, без чего модулю 6 не работать: отмеченные в CK лорбуки читаются из его настроек (ckMarkedBooks).
  */
 export const CK_MODULES = Object.freeze({
     state: {
         path: 'carrot-state.js',
-        exports: { scannedCharacters: 'object', characterRepoBooks: 'object', tagLibraries: 'object', getLastInjectedCharacters: 'function' },
+        exports: { scannedCharacters: 'object', getLastInjectedCharacters: 'function' },
     },
     sheets: { path: 'sheet-generator.js', exports: { initializeSheetGenerator: 'function', CarrotTemplateManager: 'object' } },
 });
@@ -62,6 +63,26 @@ export const CK_CHAT = Object.freeze({
 
 /** Режимы показа CK (settings.displayMode). */
 export const CK_DISPLAY_MODES = Object.freeze({ thinking: 'thinking', cards: 'cards', none: 'none' });
+
+/**
+ * Эмбеддинги RAG CK (fullsheet-rag.js, getVectorSettings): источник и модель CK берёт из настроек встроенного
+ * расширения Vector Storage ST (extension_settings.vectors), если они есть, иначе — из своих (settings.rag).
+ * Для каждого источника — поле модели в обоих местах и модель CK по умолчанию.
+ */
+export const CK_RAG = Object.freeze({
+    defaultSource: 'transformers',
+    models: Object.freeze({
+        openai: Object.freeze({ vectors: 'openai_model', rag: 'openaiModel', fallback: 'text-embedding-ada-002' }),
+        mistral: Object.freeze({ vectors: 'openai_model', rag: 'openaiModel', fallback: 'text-embedding-ada-002' }),
+        cohere: Object.freeze({ vectors: 'cohere_model', rag: 'cohereModel', fallback: 'embed-english-v3.0' }),
+        togetherai: Object.freeze({ vectors: 'togetherai_model', rag: 'togetheraiModel', fallback: 'togethercomputer/m2-bert-80M-32k-retrieval' }),
+        ollama: Object.freeze({ vectors: 'ollama_model', rag: 'ollamaModel', fallback: 'mxbai-embed-large' }),
+        vllm: Object.freeze({ vectors: 'vllm_model', rag: 'vllmModel', fallback: '' }),
+        webllm: Object.freeze({ vectors: 'webllm_model', rag: 'webllmModel', fallback: '' }),
+        palm: Object.freeze({ vectors: 'google_model', rag: 'googleModel', fallback: 'text-embedding-005' }),
+        vertexai: Object.freeze({ vectors: 'google_model', rag: 'googleModel', fallback: 'text-embedding-005' }),
+    }),
+});
 
 /**
  * Карта интерфейса CK для движка перевода (формат — UiMap в src/translator.js).
@@ -262,6 +283,12 @@ export async function inspectCk({ timeoutMs = 30000 } = {}) {
 function createCkApi(located, namespaces) {
     const { state, sheets } = namespaces;
     const settings = () => getContext().extensionSettings?.[CK_INFO.settingsKey] ?? {};
+    /** Настройки Vector Storage ST, если они есть: CK берёт эмбеддинги оттуда. */
+    const vectors = () => {
+        const value = getContext().extensionSettings?.vectors;
+        return value && typeof value === 'object' ? value : null;
+    };
+    const ragSource = () => String((vectors() ? vectors().source ?? CK_RAG.defaultSource : settings().rag?.vectorSource || CK_RAG.defaultSource) || '');
     return Object.freeze({
         name: located.name,
         version: located.manifest?.version ?? null,
@@ -270,7 +297,15 @@ function createCkApi(located, namespaces) {
         sendsToAi: () => settings().sendToAI !== false,
         displayMode: () => String(settings().displayMode ?? CK_DISPLAY_MODES.thinking),
         ragEnabled: () => settings().rag?.enabled === true,
-        ragSource: () => String(settings().rag?.vectorSource ?? ''),
+        /** Источник эмбеддингов RAG, как его выбирает CK: transformers, openai, cohere, ollama… */
+        ragSource,
+        /** Модель эмбеддингов для этого источника; '' — модель задаёт сервер (transformers, llamacpp, nomicai…). */
+        ragModel: () => {
+            const fields = CK_RAG.models[ragSource()];
+            if (!fields) return '';
+            const base = vectors();
+            return String((base ? base[fields.vectors] ?? fields.fallback : settings().rag?.[fields.rag] || fields.fallback) || '');
+        },
         /**
          * Коллекции RAG CK — живой объект его настроек { id: { characterName, keywords, alwaysActive } } или `null`.
          * `keywords` — триггеры: коллекция включается, если один из них — подстрока последних сообщений.
@@ -283,9 +318,6 @@ function createCkApi(located, namespaces) {
         saveSettings: () => getContext().saveSettingsDebounced(),
         /** Живая карта CK «лорбук::имя» → { name, tags: Map, source, uid }. */
         scanned: () => state.scannedCharacters,
-        /** Лорбуки, отмеченные в CK как архивы персонажей и библиотеки тегов. */
-        repoBooks: () => new Set(state.characterRepoBooks),
-        tagLibraries: () => new Set(state.tagLibraries),
         /** Имена персонажей, чьи теги CK вставил в этой генерации. */
         lastInjected: () => {
             const names = state.getLastInjectedCharacters?.();
@@ -315,28 +347,25 @@ function createCkApi(located, namespaces) {
             if (stored && typeof stored === 'object') stored.value = text;
         },
         /**
-         * Текст вставки тегов в формате CK, но с правильным поиском персонажа: шаблон из его
-         * Template Manager, без шаблона — запасной формат. Лимит персонажей — как у CK.
+         * Собирает ли CK вставку тегов шаблоном из Template Manager. Шаблон раскрывается макросами генератора
+         * листов ({{TRIGGERED_CHARACTER_TAGS}} и др.), а те ищут персонажа функцией из initializeSheetGenerator —
+         * с нашим поиском текст CK уже правильный (данные, которые CK передаёт в processTemplate, тот не читает).
+         * В CK 1.0.0 шаблон есть всегда: без своего — встроенный character_consistency.
+         */
+        usesInjectionTemplate() {
+            return Boolean(sheets.CarrotTemplateManager?.getPrimaryTemplateForCategory?.(CK_INJECTION.templateCategory));
+        },
+        /**
+         * Текст вставки тегов в запасном формате CK (без шаблона), но с правильным поиском персонажа:
+         * его CK собирает своим поиском, а тот путает кириллические имена. Лимит персонажей — как у CK.
+         * Шаблон не раскрываем: processTemplate CK считает использования и пересохраняет свои шаблоны.
          * @param {string[]} names
          * @param {(name: string) => { name: string, data: any }|null} find
-         * @returns {Promise<string>}
+         * @returns {string}
          */
-        async consistencyText(names, find) {
+        consistencyText(names, find) {
             const limit = Number(settings().maxCharactersDisplay);
             const chosen = names.slice(0, Number.isFinite(limit) && limit > 0 ? limit : names.length);
-            const manager = sheets.CarrotTemplateManager;
-            const template = manager?.getPrimaryTemplateForCategory?.(CK_INJECTION.templateCategory);
-            if (template) {
-                const data = chosen.map((name) => {
-                    const found = find(name);
-                    return found?.data ? { name, tags: found.data.tags } : null;
-                }).filter(Boolean);
-                if (!data.length) return '';
-                const text = await manager.processTemplate(template, data.length === 1 ? data[0] : data);
-                if (typeof text === 'string') return text;
-                if (Array.isArray(text)) return text.join('\n');
-                return text && typeof text === 'object' ? JSON.stringify(text, null, 2) : String(text || '');
-            }
             let text = CK_INJECTION.fallbackHeader;
             for (const name of chosen) {
                 const found = find(name);

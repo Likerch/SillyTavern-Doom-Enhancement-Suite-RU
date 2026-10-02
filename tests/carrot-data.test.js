@@ -59,3 +59,15 @@ test('RAG triggers get case forms of a Russian name, but no short or redundant o
     assert.ok(ragTriggerForms('Алёна', forms).includes('алены'));
     assert.deepEqual(ragTriggerForms('Atsu Ibn Oba', forms), []);
 });
+
+test('short names get no instrumental forms: CK would find them inside ordinary words', () => {
+    const forms = (word) => wordForms(word, { genitive: true });
+    const words = ['паникой', 'техникой', 'длиной', 'долиной', 'зеленой', 'грозой', 'верой', 'милой', 'картиной', 'единой', 'норой'];
+    for (const name of ['Ника', 'Лина', 'Лена', 'Роза', 'Вера', 'Мила', 'Тина', 'Дина', 'Нора']) {
+        const triggers = ragTriggerForms(name, forms);
+        for (const trigger of triggers) assert.ok(!words.some((word) => word.includes(trigger)), `${name}: ${trigger}`);
+        assert.ok(!triggers.some((trigger) => /(?:ой|ою|ей|ею)$/.test(trigger)), name);
+    }
+    // Длиннее четырёх букв творительный остаётся: «с Шарлоттой», «с Кристиной».
+    assert.ok(ragTriggerForms('Кристина', forms).includes('кристиной'));
+});

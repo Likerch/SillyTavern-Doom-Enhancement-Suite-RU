@@ -3,8 +3,9 @@
  *
  * CarrotKernel (CK) хранит теги персонажей BunnyMo в архивах и вставляет их в промпт. В русской игре:
  * 1. Кириллические имена. CK сравнивает имена через `[^\w\s]`, любое кириллическое имя у него — пустая
- *    строка, и персонаж получает теги первого попавшегося. Модуль пересобирает вставку тегов после CK
- *    с поиском по юникодному ключу имени и подменяет поиск у генератора листов и макросов CK.
+ *    строка, и персонаж получает теги первого попавшегося. Модуль подменяет поиск у генератора листов и
+ *    макросов CK (через них CK собирает и вставку тегов по шаблону) поиском по юникодному ключу имени,
+ *    а вставку без шаблона пересобирает после CK.
  * 2. Дамп тегов. В режиме показа «thinking» CK дописывает к каждому ответу блок <BunnyMoTags>: он уходит
  *    модели в истории, DES видит в нём лист и ставит кнопку импорта на обычный ответ, а перерисовка CK
  *    стирает пузыри и мысли DES. Модуль вырезает дамп из промпта, прячет ложную кнопку и возвращает
@@ -28,6 +29,8 @@ const DICTIONARY_URL = new URL('../../locales/ru.carrotkernel.json', import.meta
 const CK_WAIT_MS = 30000;
 /** Модели эмбеддингов, которые понимают русский (подсказка для RAG CK). */
 const MULTILINGUAL_HINT = 'bge-m3, multilingual-e5, embed-multilingual-v3.0, text-embedding-3-*';
+/** Имя многоязычной модели: тогда подсказка не нужна. */
+const MULTILINGUAL_MODEL = /multilingual|bge-m3|(?:^|[^a-z0-9])e5(?:$|[^a-z0-9])|text-embedding-3|gemini-embedding|embed-v4/i;
 /** Источник эмбеддингов «встроенные ST»: модель задаётся не в CK, а в config.yaml сервера. */
 const LOCAL_EMBEDDINGS = 'transformers';
 const NON_ASCII = /[^\x00-\x7F]/;
@@ -36,7 +39,7 @@ const OPTIONS = [
     {
         key: 'cyrillicNames',
         title: 'Кириллические имена',
-        description: 'CK путает персонажей с русскими именами и вставляет одному теги другого. Модуль пересобирает его вставку тегов и поиск в листах и макросах по полному имени.',
+        description: 'CK путает персонажей с русскими именами и вставляет одному теги другого. Модуль подменяет поиск персонажа в листах, макросах и вставке тегов CK. Свой поиск CK вернёт только после перезагрузки страницы.',
     },
     {
         key: 'dumpFilter',
@@ -51,7 +54,7 @@ const OPTIONS = [
     {
         key: 'ragForms',
         title: 'RAG по падежам имени',
-        description: 'RAG CK подтягивает куски листа, только если имя персонажа стоит в последних сообщениях дословно. Модуль дописывает к триггерам листа падежные формы русского имени («Шарлотте», «Шарлоттой»).',
+        description: 'RAG CK подтягивает куски листа, только если имя персонажа стоит в последних сообщениях дословно. Модуль дописывает к триггерам листа падежные формы русского имени («Шарлотте», «Шарлоттой»). Выключи — и дописанные формы уберутся из триггеров (в CK их не видно).',
     },
     {
         key: 'translateUi',
@@ -66,6 +69,14 @@ let env = null;
 let ck = null;
 /** @type {import('../ck-adapter.js').CkFacts|null} */
 let facts = null;
+/** Проверка CK упала с ошибкой (подробности — в журнале). */
+let inspectFailed = false;
+/** Номер включения модуля: проверка CK, закончившаяся после выключения или нового включения, ничего не подключает. */
+let enableRun = 0;
+/** Номер запуска перевода интерфейса: словарь, догрузившийся после выключения перевода, его не включает. */
+let translatorRun = 0;
+/** Наш поиск уже отдан генератору листов CK (вернуть CK его собственный нельзя до перезагрузки страницы). */
+let finderInstalled = false;
 /** @type {Array<[string, (...args: any[]) => unknown]>} */
 let subscriptions = [];
 /** @type {MutationObserver|null} */
@@ -89,13 +100,17 @@ function option(key) {
 
 function notifyChange() {
     clearTimeout(notifyTimer);
-    notifyTimer = setTimeout(() => changeListeners.forEach((listener) => {
-        try {
-            listener();
-        } catch (error) {
-            log.warn('CarrotKernel: панель не обновилась', error);
-        }
-    }), 200);
+    notifyTimer = setTimeout(() => {
+        // Состояние модуля в списке модулей (например, «ищет CarrotKernel…» → «работает») рисует ядро.
+        env?.refresh?.();
+        changeListeners.forEach((listener) => {
+            try {
+                listener();
+            } catch (error) {
+                log.warn('CarrotKernel: панель не обновилась', error);
+            }
+        });
+    }, 200);
 }
 
 const translator = createTranslator({
@@ -110,18 +125,26 @@ const translator = createTranslator({
 // ─── 1. Кириллические имена ────────────────────────────────────────────────
 
 /**
- * Поиск персонажа для CK — с той же сигнатурой, что у его findCharacterByName.
+ * Поиск персонажа для CK — с той же сигнатурой, что у его findCharacterByName. Не зависит от того, включён ли
+ * модуль: CK держит эту функцию до перезагрузки страницы, и поиск должен работать и после выключения.
+ * @param {import('../ck-adapter.js').CkApi} api CK, которому отдали поиск
  * @param {string} name
  * @param {string|null} [lorebook]
  */
-function findForCk(name, lorebook = null) {
-    if (!ck || !name) return null;
-    const scanned = ck.scanned();
-    if (lorebook && scanned.has(`${lorebook}::${name}`)) {
-        const data = scanned.get(`${lorebook}::${name}`);
-        return { name: data?.name || name, data };
+function findIn(api, name, lorebook = null) {
+    if (!name) return null;
+    try {
+        const scanned = api.scanned();
+        if (!scanned || typeof scanned.entries !== 'function') return null;
+        if (lorebook && scanned.has(`${lorebook}::${name}`)) {
+            const data = scanned.get(`${lorebook}::${name}`);
+            return { name: data?.name || name, data };
+        }
+        return findCharacter(scanned.entries(), String(name), activeSources);
+    } catch (error) {
+        log.warn('CarrotKernel: поиск персонажа не удался', error);
+        return null;
     }
-    return findCharacter(scanned.entries(), String(name), activeSources);
 }
 
 /**
@@ -132,38 +155,49 @@ function rememberSources(entryList) {
     activeSources = new Set((Array.isArray(entryList) ? entryList : []).map((entry) => entry?.world).filter(Boolean));
 }
 
-/** Поиск для генератора листов и макросов CK (его вызывает и шаблон вставки тегов). */
+/** Поиск для генератора листов и макросов CK (через них CK собирает и вставку тегов по шаблону). */
 function installFinder() {
-    ck?.installFinder((name, lorebook) => findForCk(name, lorebook));
+    if (!ck) return;
+    const api = ck;
+    api.installFinder((name, lorebook) => findIn(api, name, lorebook));
+    finderInstalled = true;
 }
 
 /**
- * После CK: если в его вставке тегов есть не-латинские имена, пересобрать её с правильным поиском.
+ * После CK: вставку тегов без шаблона CK собирает своим поиском — если в ней кириллические имена,
+ * пересобрать с правильным. Вставку по шаблону CK собирает макросами, а они уже ищут нашим поиском.
  */
-async function fixConsistency() {
+function fixConsistency() {
     if (!ck || !option('cyrillicNames') || !ck.enabled() || !ck.sendsToAi()) return;
+    if (finderInstalled && ck.usesInjectionTemplate()) return;
     const names = ck.lastInjected();
     if (!names.some((name) => NON_ASCII.test(name))) return;
     const slot = ck.consistencySlot();
     if (!slot?.value) return;
-    const text = await ck.consistencyText(names, (name) => findForCk(name));
+    const api = ck;
+    const text = api.consistencyText(names, (name) => findIn(api, name));
     if (!text || text === slot.value) return;
-    ck.setConsistencyText(text);
+    api.setConsistencyText(text);
     counters.consistency += 1;
     log.info(`CarrotKernel: вставка тегов пересобрана для ${names.join(', ')} — CK путает кириллические имена.`);
     notifyChange();
+}
+
+/** Формы, которые модуль дописал в триггеры коллекций RAG: { id коллекции: формы }. */
+function ragFormsAdded() {
+    const added = moduleSettings().ragFormsAdded;
+    return added && typeof added === 'object' && !Array.isArray(added) ? added : {};
 }
 
 /**
  * Триггеры коллекций RAG CK: падежные формы русского имени персонажа. Формы, которые пользователь сам убрал
  * из триггеров в CK, не возвращаем — для этого помним, что дописывали.
  */
-function ensureRagTriggerForms() {
+function addRagTriggerForms() {
     if (!ck || !option('ragForms') || !ck.ragEnabled()) return;
     const collections = ck.ragCollections();
     if (!collections) return;
-    const settings = moduleSettings();
-    const added = settings.ragFormsAdded && typeof settings.ragFormsAdded === 'object' ? settings.ragFormsAdded : {};
+    const added = ragFormsAdded();
     let total = 0;
     for (const [id, meta] of Object.entries(collections)) {
         if (!meta || typeof meta !== 'object' || !meta.characterName) continue;
@@ -177,12 +211,56 @@ function ensureRagTriggerForms() {
         total += missing.length;
     }
     if (!total) return;
-    settings.ragFormsAdded = added;
+    moduleSettings().ragFormsAdded = added;
     saveSettings();
     ck.saveSettings();
     counters.ragForms += total;
     log.info(`CarrotKernel: к триггерам RAG дописаны падежные формы имён (${total}).`);
     notifyChange();
+}
+
+/**
+ * Опция выключена — убрать из триггеров RAG формы, которые дописал модуль: в CK 1.0.0 триггеры коллекций
+ * не видны и не правятся из интерфейса, так что это единственный способ их снять. Формы, которые пользователь
+ * убрал сам, помним и дальше — при новом включении опции они не вернутся.
+ */
+function removeRagTriggerForms() {
+    if (!ck) return;
+    const added = ragFormsAdded();
+    if (!Object.keys(added).length) return;
+    const collections = ck.ragCollections() ?? {};
+    /** @type {Record<string, string[]>} */
+    const kept = {};
+    let removed = 0;
+    for (const [id, forms] of Object.entries(added)) {
+        const meta = collections[id];
+        // Коллекции больше нет — и помнить нечего.
+        if (!meta || typeof meta !== 'object') continue;
+        const ours = new Set((Array.isArray(forms) ? forms : []).map((form) => String(form).toLowerCase()));
+        const keywords = Array.isArray(meta.keywords) ? meta.keywords : [];
+        const rest = keywords.filter((keyword) => !ours.has(String(keyword).toLowerCase()));
+        const present = new Set(keywords.map((keyword) => String(keyword).toLowerCase()));
+        const userRemoved = [...ours].filter((form) => !present.has(form));
+        if (rest.length !== keywords.length) {
+            meta.keywords = rest;
+            removed += keywords.length - rest.length;
+        }
+        if (userRemoved.length) kept[id] = userRemoved;
+    }
+    if (JSON.stringify(kept) !== JSON.stringify(added)) {
+        moduleSettings().ragFormsAdded = kept;
+        saveSettings();
+    }
+    if (!removed) return;
+    ck.saveSettings();
+    log.info(`CarrotKernel: из триггеров RAG убраны падежные формы имён, которые дописал модуль (${removed}).`);
+    notifyChange();
+}
+
+/** Триггеры RAG — по опции: дописать формы или убрать дописанные. */
+function syncRagTriggerForms() {
+    if (option('ragForms')) addRagTriggerForms();
+    else removeRagTriggerForms();
 }
 
 // ─── 2. Дамп тегов и DES ───────────────────────────────────────────────────
@@ -402,7 +480,8 @@ function mountSection(section) {
         list.replaceChildren();
         const lines = [];
         if (!env) lines.push('Модуль выключен.');
-        else if (!facts?.found) lines.push('CarrotKernel не установлен.');
+        else if (!facts) lines.push(inspectFailed ? 'Проверка CarrotKernel не удалась — подробности в журнале.' : 'Ищу CarrotKernel: жду, пока он закончит запуск…');
+        else if (!facts.found) lines.push('CarrotKernel не установлен.');
         else if (!ck) lines.push('CarrotKernel недоступен — причина в замечаниях модуля выше.');
         else {
             lines.push(`${facts.name} · v${facts.version ?? '?'} · режим показа «${ck.displayMode()}».`);
@@ -424,19 +503,67 @@ function mountSection(section) {
 
 async function startTranslator() {
     if (translator.running || !option('translateUi')) return;
+    const run = ++translatorRun;
     dictionaryFailed = false;
     try {
         await translator.load(DICTIONARY_URL);
     } catch (error) {
+        if (run !== translatorRun) return;
         dictionaryFailed = true;
         log.error('CarrotKernel: не удалось загрузить locales/ru.carrotkernel.json — интерфейс CK останется английским', error);
     }
+    // Пока грузился словарь, перевод или модуль могли выключить.
+    if (run !== translatorRun || !ck || !option('translateUi')) return;
     translator.rebuild();
     translator.start();
     log.info(renderTemplate('CarrotKernel: перевод интерфейса включён, в словаре {n} {n|строка|строки|строк}.', { n: String(translator.size()) }));
 }
 
+function stopTranslator() {
+    translatorRun += 1;
+    translator.stop();
+}
+
+/** Запуск перевода из обработчиков: без необработанных отказов промиса. */
+function startTranslatorSafely() {
+    startTranslator().then(notifyChange).catch((error) => log.error('CarrotKernel: перевод интерфейса не запустился', error));
+}
+
 // ─── Модуль ────────────────────────────────────────────────────────────────
+
+/**
+ * CK проверен: подключиться к нему.
+ * @param {{ facts: import('../ck-adapter.js').CkFacts, api: import('../ck-adapter.js').CkApi|null }} result
+ */
+function attach(result) {
+    facts = result.facts;
+    ck = result.api;
+    if (!ck) {
+        log.info(facts.found ? `CarrotKernel найден, но недоступен: ${describeProblem()}` : 'CarrotKernel не установлен — модулю 6 нечего делать.');
+        notifyChange();
+        return;
+    }
+    const { eventTypes } = getContext();
+    if (option('cyrillicNames')) installFinder();
+    // CK пишет вставку тегов в своём WORLD_INFO_ACTIVATED; запоминаем лорбуки до него, пересобираем после.
+    subscribe('makeFirst', eventTypes.WORLD_INFO_ACTIVATED, rememberSources);
+    const fix = subscribe('makeLast', eventTypes.WORLD_INFO_ACTIVATED, fixConsistency);
+    subscribe('makeFirst', eventTypes.GENERATION_STARTED, () => getContext().eventSource.makeLast(eventTypes.WORLD_INFO_ACTIVATED, fix));
+    // RAG CK выбирает коллекции в своём перехватчике генерации — он идёт после GENERATION_STARTED.
+    subscribe('on', eventTypes.GENERATION_STARTED, syncRagTriggerForms);
+    subscribe('on', eventTypes.CHAT_COMPLETION_PROMPT_READY, stripFromChatCompletion);
+    subscribe('on', eventTypes.GENERATE_AFTER_COMBINE_PROMPTS, stripFromTextCompletion);
+    subscribe('on', eventTypes.CHAT_CHANGED, () => {
+        observeChat();
+        translator.refreshChat();
+        syncRagTriggerForms();
+    });
+    observeChat();
+    syncRagTriggerForms();
+    startTranslatorSafely();
+    notifyChange();
+    log.info(`Модуль 6 (CarrotKernel) включён: ${facts.name} v${facts.version ?? '?'}.`);
+}
 
 /** @type {import('../core.js').AddonModule} */
 export default {
@@ -448,50 +575,46 @@ export default {
     options: OPTIONS,
     section: 'carrotKernel',
     mountSection,
-    async enable(environment) {
+    enable(environment) {
         env = environment;
-        const result = await inspectCk({ timeoutMs: CK_WAIT_MS });
-        if (!env) return;
-        facts = result.facts;
-        ck = result.api;
-        if (!ck) {
-            log.info(facts.found ? `CarrotKernel найден, но недоступен: ${describeProblem()}` : 'CarrotKernel не установлен — модулю 6 нечего делать.');
-            notifyChange();
-            return;
-        }
-        const { eventTypes } = getContext();
-        if (option('cyrillicNames')) installFinder();
-        // CK пишет вставку тегов в своём WORLD_INFO_ACTIVATED; запоминаем лорбуки до него, пересобираем после.
-        subscribe('makeFirst', eventTypes.WORLD_INFO_ACTIVATED, rememberSources);
-        const fix = subscribe('makeLast', eventTypes.WORLD_INFO_ACTIVATED, fixConsistency);
-        subscribe('makeFirst', eventTypes.GENERATION_STARTED, () => getContext().eventSource.makeLast(eventTypes.WORLD_INFO_ACTIVATED, fix));
-        // RAG CK выбирает коллекции в своём перехватчике генерации — он идёт после GENERATION_STARTED.
-        subscribe('on', eventTypes.GENERATION_STARTED, ensureRagTriggerForms);
-        subscribe('on', eventTypes.CHAT_COMPLETION_PROMPT_READY, stripFromChatCompletion);
-        subscribe('on', eventTypes.GENERATE_AFTER_COMBINE_PROMPTS, stripFromTextCompletion);
-        subscribe('on', eventTypes.CHAT_CHANGED, () => {
-            observeChat();
-            translator.refreshChat();
-            ensureRagTriggerForms();
-        });
-        observeChat();
-        ensureRagTriggerForms();
-        await startTranslator();
+        facts = null;
+        ck = null;
+        inspectFailed = false;
+        const run = ++enableRun;
+        // CK заканчивает запуск не сразу, проверка ждёт его панель до 30 секунд — в фоне, чтобы не держать
+        // очередь модулей надстройки. Пока ждём, статус модуля — «ищет CarrotKernel…».
+        inspectCk({ timeoutMs: CK_WAIT_MS })
+            .then((result) => {
+                if (run === enableRun && env) attach(result);
+            })
+            .catch((error) => {
+                if (run !== enableRun) return;
+                inspectFailed = true;
+                log.error('CarrotKernel: проверка не удалась — модуль 6 не работает до перезагрузки страницы', error);
+                notifyChange();
+            });
         notifyChange();
-        log.info(`Модуль 6 (CarrotKernel) включён: ${facts.name} v${facts.version ?? '?'}.`);
     },
     disable() {
+        enableRun += 1;
         unsubscribeAll();
         chatObserver?.disconnect();
         chatObserver = null;
-        translator.stop();
-        if (ck) log.info('Модуль 6 (CarrotKernel) выключен. Поиск персонажей в листах CK вернётся к своему после перезагрузки страницы.');
+        stopTranslator();
+        for (const timer of restoreTimers.values()) clearTimeout(timer);
+        restoreTimers.clear();
+        activeSources = new Set();
+        if (ck) {
+            log.info(finderInstalled
+                ? 'Модуль 6 (CarrotKernel) выключен. Поиск персонажей в листах и макросах CK остаётся нашим до перезагрузки страницы — CK не даёт вернуть свой.'
+                : 'Модуль 6 (CarrotKernel) выключен.');
+        }
         ck = null;
         env = null;
         notifyChange();
     },
     status() {
-        if (!facts) return { text: 'ищет CarrotKernel…', tone: 'wait' };
+        if (!facts) return inspectFailed ? { text: 'CK: проверка не удалась', tone: 'blocked' } : { text: 'ищет CarrotKernel…', tone: 'wait' };
         if (!facts.found) return { text: 'ждёт: CK не установлен', tone: 'off' };
         if (!ck) return { text: 'CK недоступен', tone: 'blocked' };
         return null;
@@ -500,19 +623,27 @@ export default {
         if (!ck) return;
         if (key === 'cyrillicNames') {
             if (enabled) installFinder();
-            else log.info('CarrotKernel: поиск персонажей в листах и макросах CK вернётся к своему после перезагрузки страницы.');
+            else if (finderInstalled) log.info('CarrotKernel: поиск персонажей в листах и макросах CK вернётся к своему после перезагрузки страницы.');
+            return;
+        }
+        if (key === 'ragForms') {
+            syncRagTriggerForms();
             return;
         }
         if (key !== 'translateUi') return;
-        if (enabled) startTranslator().then(notifyChange);
+        if (enabled) startTranslatorSafely();
         else {
-            translator.stop();
+            stopTranslator();
             notifyChange();
         }
     },
     notes() {
         const notes = [];
-        if (!facts?.found) {
+        if (!facts) {
+            if (inspectFailed) notes.push({ level: 'warn', text: 'Не удалось проверить CarrotKernel — подробности в журнале. Помогает перезагрузка страницы.' });
+            return notes;
+        }
+        if (!facts.found) {
             notes.push({ level: 'info', text: 'CarrotKernel не установлен — модуль ждёт. После установки перезагрузи страницу.' });
             return notes;
         }
@@ -528,7 +659,7 @@ export default {
         }
         if (ck.ragEnabled() && ck.ragSource() === LOCAL_EMBEDDINGS) {
             notes.push({ level: 'info', text: 'RAG CK — на встроенных эмбеддингах ST: модель задаётся в config.yaml сервера (extensions.models.embedding). Для русских листов нужна многоязычная, например Xenova/multilingual-e5-small; английская по умолчанию ищет плохо.' });
-        } else if (ck.ragEnabled() && !/multilingual|bge-m3|e5|text-embedding-3/i.test(ck.ragSource())) {
+        } else if (ck.ragEnabled() && !MULTILINGUAL_MODEL.test(ck.ragModel())) {
             notes.push({ level: 'info', text: `RAG CK включён: для русских листов нужна многоязычная модель эмбеддингов (${MULTILINGUAL_HINT}), английская ищет плохо.` });
         }
         if (dictionaryFailed) notes.push({ level: 'warn', text: 'Словарь интерфейса CK не загрузился — переводятся только строки из своего словаря.' });

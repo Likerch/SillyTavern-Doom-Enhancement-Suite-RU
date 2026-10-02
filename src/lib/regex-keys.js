@@ -11,6 +11,12 @@
 const WORD_CHAR = '[\\p{L}\\p{N}_]';
 export const WORD_START = `(?<!${WORD_CHAR})`;
 export const WORD_END = `(?!${WORD_CHAR})`;
+/**
+ * Хвост ключа: совпадение не внутри тега <…> на той же строке — перед ним нет незакрытой «<» или после
+ * него нет «>». Ставится в конец ключа, чтобы проверка шла только там, где слово уже нашлось.
+ * Без флага `u` тоже работает — годится и для чужих ключей-регулярок.
+ */
+export const OUTSIDE_TAG = '(?:(?<!<[^<>\\n]*)|(?![^<>\\n]*>))';
 
 /** @param {string} text */
 export function escapeRegex(text) {
@@ -74,6 +80,28 @@ export function nameFormsKey(name, formsOf) {
         return forms.length > 1 ? `(?:${forms.map(yoTolerant).join('|')})` : yoTolerant(forms[0]);
     });
     return regexKey(`${WORD_START}${parts.join('\\s+')}${WORD_END}`);
+}
+
+/**
+ * Ключ, который не срабатывает внутри тегов: «jealousy» не находится в <JEALOUSY:POSSESSIVE>, «clingy» —
+ * в <TRAIT:SHY, CLINGY>. Нужен ключам, которые сканируют и вставку тегов сцены (её ST добавляет к тексту
+ * каждой записи, запрет рекурсии на неё не действует).
+ * Обычный ключ становится регуляркой с теми же правилами, что у записи; у ключа-регулярки дописывается
+ * проверка в конец, флаги остаются. Ключ, который ST не примет, и пустой — без изменений.
+ * @param {unknown} key
+ * @param {{ caseSensitive?: boolean, wholeWords?: boolean }} [options] как у записи: без учёта регистра, целым словом
+ * @returns {string}
+ */
+export function outsideTagsKey(key, { caseSensitive = false, wholeWords = true } = {}) {
+    const text = String(key ?? '').trim();
+    if (!text) return String(key ?? '');
+    if (isRegexKey(text)) {
+        const match = text.match(/^\/([\w\W]+?)\/([gimsuy]*)$/);
+        if (!match || !compileKey(text) || match[1].endsWith(OUTSIDE_TAG)) return text;
+        return `/(?:${match[1]})${OUTSIDE_TAG}/${match[2]}`;
+    }
+    const words = text.split(/\s+/).map(escapeRegex).join('\\s+');
+    return regexKey(`${wholeWords ? `${WORD_START}${words}${WORD_END}` : words}${OUTSIDE_TAG}`, caseSensitive ? 'u' : 'iu');
 }
 
 /**

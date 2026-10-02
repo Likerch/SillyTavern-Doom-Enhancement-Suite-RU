@@ -30,14 +30,18 @@ const MIN_STEM = 2;
  * Александр → Александра, Ян → Яна, Валерий → Валерия, Петров → Петрова. Новая героиня появляется в трекере
  * как раз в именительном, и склейка спрятала бы её в карточку мужчины. Поэтому эти формы модуль не склеивает —
  * их решает попап DES («тот же персонаж?»). Остальные падежи мужских имён (Ивану, Иваном, Иване) склеиваются.
- * Для поиска имени в тексте (ключи лорбука, раскраска реплик) родительный нужен: там `genitive: true`.
+ * Так же и наоборот: косвенные падежи женской фамилии на -ая совпадают с мужской на -ой (Толстая → Толстой,
+ * Трубецкая → Трубецкой) — мужчина не прячется в карточку женщины. В имени из нескольких слов такая форма
+ * подходит, если другое слово явно в косвенном падеже: «Ани Толстой» — это «Аня Толстая» (isCaseFormOf).
+ * Для поиска имени в тексте (ключи лорбука, раскраска реплик) эти формы нужны: там `genitive: true`.
  */
 
 /**
  * Основы и окончания падежных форм для одного слова в именительном падеже.
  * Пустой список — слово не склоняется (Акари, Хироко): совпадёт только оно само.
  * @param {string} word нормализованное слово
- * @param {{ genitive?: boolean }} [options] `genitive` — с родительным мужских имён (см. MALE_GENITIVE_NOTE)
+ * @param {{ genitive?: boolean }} [options] `genitive` — и с формами, которые совпадают с именительным другого
+ *        имени: родительный мужских имён и -ой женских фамилий на -ая (см. MALE_GENITIVE_NOTE)
  * @returns {{ stem: string, endings: string[] }[]}
  */
 export function declension(word, { genitive = false } = {}) {
@@ -48,7 +52,8 @@ export function declension(word, { genitive = false } = {}) {
         return [{ stem: stem(1), endings: ['я', 'и', 'ю', 'ей', 'ею'] }]; // Мария
     }
     if (word.endsWith('ая') && fits(2)) {
-        return [{ stem: stem(2), endings: ['ая', 'ой', 'ую', 'ою'] }]; // Толстая
+        // Без -ой: «Толстой», «Трубецкой» — это и мужские фамилии (см. MALE_GENITIVE_NOTE).
+        return [{ stem: stem(2), endings: ['ая', 'ую', 'ою', ...(genitive ? ['ой'] : [])] }]; // Толстая
     }
     if (word.endsWith('я') && fits(1)) {
         return [{ stem: stem(1), endings: ['я', 'и', 'е', 'ю', 'ей', 'ею'] }]; // Аня, Илья
@@ -107,10 +112,11 @@ export function wordForms(word, options) {
  * Форма ли слово `variant` слова `canonical` в каком-то падеже (оба нормализованы).
  * @param {string} variant
  * @param {string} canonical
+ * @param {{ genitive?: boolean }} [options] как у declension
  */
-export function isWordForm(variant, canonical) {
+export function isWordForm(variant, canonical, options) {
     if (variant === canonical) return true;
-    return declension(canonical).some(({ stem, endings }) => endings.some((ending) => variant === stem + ending));
+    return declension(canonical, options).some(({ stem, endings }) => endings.some((ending) => variant === stem + ending));
 }
 
 /**
@@ -123,14 +129,19 @@ export function isCaseFormOf(variant, canonical) {
     const variantWords = normalizeRussianName(variant).split(' ');
     const canonicalWords = normalizeRussianName(canonical).split(' ');
     if (!variantWords[0] || variantWords.length !== canonicalWords.length) return false;
-    return variantWords.every((word, index) => isWordForm(word, canonicalWords[index]));
+    const strict = variantWords.map((word, index) => isWordForm(word, canonicalWords[index]));
+    if (strict.every(Boolean)) return true;
+    // Форма, совпадающая с именительным другого имени («Толстой», «Петрова»), подходит, только если другое слово
+    // явно в косвенном падеже: «Ани Толстой» — это «Аня Толстая», а «Аня Петрова» — не «Аня Петров».
+    const oblique = variantWords.some((word, index) => strict[index] && word !== canonicalWords[index]);
+    return oblique && variantWords.every((word, index) => strict[index] || isWordForm(word, canonicalWords[index], { genitive: true }));
 }
 
 // ─── Звания, обращения, части имени ────────────────────────────────────────
 
 /**
  * Звания и обращения перед именем: «Капитан Дарган», «Леди Мира». Только те, что не бывают родством:
- * «мать Ани» — другой персонаж, а не Аня.
+ * «мать Ани» — другой персонаж, а не Аня. И не бывают именем: «Хан Соло» — не «Соло».
  */
 const TITLES = new Set([
     'капитан', 'лейтенант', 'майор', 'полковник', 'подполковник', 'генерал', 'фельдмаршал', 'маршал', 'адмирал',
@@ -139,9 +150,32 @@ const TITLES = new Set([
     'сеньор', 'сеньора', 'сеньорита', 'синьор', 'синьора', 'мадам', 'мадемуазель', 'месье', 'мсье', 'фрау', 'фройляйн',
     'герр', 'пан', 'пани', 'князь', 'княгиня', 'княжна', 'граф', 'графиня', 'барон', 'баронесса', 'виконт', 'виконтесса',
     'маркиз', 'маркиза', 'герцог', 'герцогиня', 'король', 'королева', 'принц', 'принцесса', 'царь', 'царица', 'царевна',
-    'царевич', 'император', 'императрица', 'султан', 'шейх', 'эмир', 'хан', 'святой', 'святая', 'преподобный',
+    'царевич', 'император', 'императрица', 'султан', 'шейх', 'эмир', 'святой', 'святая', 'преподобный',
     'учитель', 'учительница', 'сенсей', 'мастер', 'магистр', 'советник', 'министр', 'судья', 'шериф', 'детектив',
     'инспектор', 'агент', 'следователь', 'констебль', 'комиссар', 'старейшина', 'вождь', 'жрец', 'жрица', 'архимаг',
+]);
+
+/**
+ * Слова, с которых начинается описание, а не имя: родство, возраст, люди и роли («Мать Ани», «Брат Анны»,
+ * «Старший стражник», «Девушка в красном»). У такой карточки нет имени, по которому её зовут одним словом.
+ * Нормализованы (ё → е).
+ */
+const DESCRIPTORS = new Set([
+    // родство
+    'мать', 'мама', 'матушка', 'отец', 'папа', 'батюшка', 'брат', 'братец', 'братишка', 'сестра', 'сестрица', 'сестренка',
+    'сын', 'сынок', 'дочь', 'дочка', 'жена', 'муж', 'супруг', 'супруга', 'дядя', 'дядюшка', 'тетя', 'тетушка', 'тетка',
+    'бабушка', 'бабуля', 'бабка', 'дедушка', 'дед', 'внук', 'внучка', 'племянник', 'племянница', 'кузен', 'кузина',
+    'мачеха', 'отчим', 'теща', 'тесть', 'свекровь', 'свекор', 'зять', 'невестка', 'невеста', 'жених', 'вдова', 'вдовец',
+    // возраст, порядок
+    'старший', 'старшая', 'младший', 'младшая', 'старый', 'старая', 'молодой', 'молодая', 'юный', 'юная',
+    'маленький', 'маленькая', 'первый', 'первая', 'второй', 'вторая', 'третий', 'третья', 'главный', 'главная',
+    // люди
+    'девушка', 'парень', 'мужчина', 'женщина', 'девочка', 'мальчик', 'ребенок', 'юноша', 'старик', 'старуха',
+    'незнакомец', 'незнакомка', 'человек', 'гость', 'гостья',
+    // роли
+    'стражник', 'стражница', 'страж', 'охранник', 'охранница', 'солдат', 'слуга', 'служанка', 'горничная', 'дворецкий',
+    'торговец', 'торговка', 'продавец', 'продавщица', 'хозяин', 'хозяйка', 'трактирщик', 'трактирщица', 'бармен',
+    'официант', 'официантка', 'кузнец', 'лекарь', 'целитель', 'целительница',
 ]);
 
 /** Японские суффиксы обращения: «Аня-сан», «Акари-тян», «Akari-chan». */
@@ -172,13 +206,19 @@ export function stripAddress(name) {
 }
 
 /**
- * Слова имени, по которым его зовут отдельно: без частиц и коротких служебных слов.
- * @param {string} name нормализованное имя
+ * Где в имени из нескольких слов само имя — первое значимое слово (без званий и частиц), по которому карточку
+ * зовут отдельно: «Аня» — «Аня Петрова», «Дарган» — «Капитан Дарган фон Вартенбург». Фамилия одна — не повод
+ * склеивать (однофамильцы, родня): это решает попап DES. У карточки-описания («Мать Ани», «Девушка в красном»)
+ * имени нет. Слова — в нижнем регистре, ё можно не заменять.
+ * @param {readonly string[]} words
+ * @returns {number} индекс имени или -1
  */
-function nameParts(name) {
-    const words = name.split(' ');
-    if (words.length < 2) return [];
-    return words.filter((word) => word.length >= 3 && !NAME_PARTICLES.has(word) && !TITLES.has(word));
+function givenNameIndex(words) {
+    if (words.length < 2) return -1;
+    const plain = words.map((word) => word.replace(/ё/g, 'е'));
+    const index = plain.findIndex((word) => !TITLES.has(word) && !NAME_PARTICLES.has(word));
+    if (index < 0 || plain[index].length < 3 || DESCRIPTORS.has(plain[index])) return -1;
+    return index;
 }
 
 /** @param {string} name */
@@ -188,7 +228,7 @@ function lowerWords(name) {
 
 /**
  * Уменьшительное ли `variant` (в любом падеже) от полного имени `canonical` — или наоборот,
- * когда карточка названа уменьшительно («Саша», а в трекере «Александру»).
+ * когда карточка названа уменьшительно («Ваня», а в трекере «Ивану»).
  * @param {string} variant нормализованное слово
  * @param {string} canonical нормализованное слово
  */
@@ -197,10 +237,12 @@ export function isDiminutiveOf(variant, canonical) {
     if (forms && forms.some((form) => isWordForm(variant, form))) return true;
     const fullNames = FULL_NAMES_BY_DIMINUTIVE.get(canonical);
     if (!fullNames) return false;
-    if (fullNames.some((full) => isWordForm(variant, full))) return true;
+    // Карточка названа уменьшительно: имя из трекера должно подходить ко всем, кем она может быть.
+    // «Евгений» при карточке «Женя» не склеится — Женя бывает и Евгенией.
+    if (fullNames.length === 1 && isWordForm(variant, fullNames[0])) return true;
     // Обе формы уменьшительные от одного имени: карточка «Лиза», в трекере «Лизонька».
     for (const [form, owners] of FULL_NAMES_BY_DIMINUTIVE) {
-        if (form !== canonical && isWordForm(variant, form) && owners.some((owner) => fullNames.includes(owner))) return true;
+        if (form !== canonical && isWordForm(variant, form) && fullNames.every((full) => owners.includes(full))) return true;
     }
     return false;
 }
@@ -209,7 +251,9 @@ export function isDiminutiveOf(variant, canonical) {
 
 /**
  * @typedef {object} NameContext
- * @property {readonly string[]} npcCards карточки NPC: только к ним DES разрешает алиасы
+ * @property {readonly string[]} npcCards карточки NPC, к которым можно склеить: только к ним DES разрешает алиасы
+ * @property {readonly string[]} [hiddenCards] карточки NPC, скрытые из «Present Characters»: сами не склеиваются
+ *           и к ним не склеивают (так DES хранит и скрытые модулем формы имени игрока)
  * @property {(name: string) => string} keyOf нормализация имени, как у DES
  * @property {ReadonlyMap<string, readonly string[]>} cardKeys ключ DES → карточки с таким ключом (и персонажи пользователя)
  * @property {(name: string) => boolean} isAlias DES уже знает это имя как алиас
@@ -260,7 +304,9 @@ function matchSteps(context) {
             via: 'часть имени',
             test(variant, card) {
                 if (variant.includes(' ')) return false;
-                return nameParts(normalizeRussianName(card)).some((part) => isWordForm(variant, part));
+                const words = normalizeRussianName(card).split(' ');
+                const index = givenNameIndex(words);
+                return index >= 0 && isWordForm(variant, words[index]);
             },
         });
     }
@@ -287,8 +333,8 @@ function matchSteps(context) {
                 if (variantWords.length === cardWords.length) {
                     return variantWords.every((word, index) => sameWordAcrossScripts(word, cardWords[index]));
                 }
-                return variantWords.length === 1 && cardWords.length > 1
-                    && nameParts(cardWords.join(' ')).some((part) => sameWordAcrossScripts(variantWords[0], part));
+                const index = givenNameIndex(cardWords);
+                return variantWords.length === 1 && index >= 0 && sameWordAcrossScripts(variantWords[0], cardWords[index]);
             },
         });
     }
@@ -305,7 +351,7 @@ function matchSteps(context) {
 export function decideName(name, context) {
     const variant = String(name ?? '').trim();
     if (!variant) return { action: 'skip', reason: 'пустое имя' };
-    if (context.npcCards.includes(variant)) return { action: 'skip', reason: 'это карточка' };
+    if (context.npcCards.includes(variant) || context.hiddenCards?.includes(variant)) return { action: 'skip', reason: 'это карточка' };
     if (context.isAlias(variant)) return { action: 'skip', reason: 'уже алиас' };
     const normalized = normalizeRussianName(variant);
     const npc = [...new Set(context.npcCards)];
@@ -367,8 +413,9 @@ function significantWords(name) {
 /**
  * Чей лист. DES сохраняет лист под именем, которое подставил из самого листа, а оно бывает полнее карточки:
  * «Флоренс Клеймор (урождённая Блэкени)» при карточке «Флоренс». По очереди: как имя из трекера (decideName),
- * то же без пояснений и, наконец, карточка, все слова которой есть в имени из листа. Из таких берём самую
- * полную («Флоренс Клеймор» раньше «Флоренс»); две равные («Флоренс» и «Клеймор») — решать пользователю.
+ * то же без пояснений и, наконец, карточка, все слова которой есть в имени из листа и среди них — первое
+ * значимое слово этого имени (само имя): «Артур Клеймор» — не лист «Клеймора» и не «Мистера Клеймора».
+ * Из таких берём самую полную («Флоренс Клеймор» раньше «Флоренс»); две равные — решать пользователю.
  * @param {string} name
  * @param {NameContext} context
  * @returns {NameDecision}
@@ -392,17 +439,17 @@ export function decideSheetOwner(name, context) {
         if (decision.action !== 'skip' || decision.candidates) return decision;
     }
 
-    // Полное имя при короткой карточке: все слова карточки есть в имени из листа.
+    // Полное имя при короткой карточке: все слова карточки есть в имени из листа, и имя из листа — одно из них.
     const words = significantWords(bare);
     if (words.length < 2) return direct;
     const translit = context.steps?.translit !== false;
     /** @param {string} a @param {string} b */
     const same = (a, b) => a.replace(/ё/g, 'е') === b.replace(/ё/g, 'е') || (translit && sameWordAcrossScripts(a, b));
-    /** @param {string} card @returns {number} сколько слов карточки нашлось; 0 — не все */
+    /** @param {string} card @returns {number} сколько слов карточки нашлось; 0 — не все или нет имени */
     const fit = (card) => {
         const cardWords = significantWords(card);
         const all = cardWords.length > 0 && cardWords.every((word) => words.some((own) => same(own, word)));
-        return all ? cardWords.length : 0;
+        return all && cardWords.some((word) => same(words[0], word)) ? cardWords.length : 0;
     };
     const personas = [...new Set(users)].filter((card) => fit(card) > 0);
     if (personas.length) return { action: 'skip', reason: 'похоже на персонажа пользователя', candidates: personas };

@@ -11,11 +11,15 @@ export const DEFAULT_SETTINGS = {
     debug: false,
     modules: {
         localization: { enabled: true, toasts: true, collect: true, userDictionary: {} },
-        // exceptions: имена, которые не склеивать; journal: склейки { variant, canonical, kind, via, at }; unmerged: разъединённые пары;
-        // caseAliasesAdded: алиасы-написания (нижний регистр, без ё), которые модуль дописал сам
+        // exceptions: имена, которые не склеивать; journal: склейки { variant, canonical, kind, via, at, chatId? }
+        // (chatId — чат, где склеили: скрытие действует только в нём); unmerged: разъединённые пары;
+        // caseAliasesAdded: алиасы-написания (нижний регистр, без ё), которые модуль дописал сам; caseAliasesRemoved:
+        // такие алиасы, убранные пользователем, — больше не дописываются; caseAliasesMigrated: из unmerged убраны
+        // пары, которые туда по ошибке клали алиасы-написания с «ё» (0.6.2 и раньше)
         names: {
             enabled: true, aliasForms: true, nominativePrompt: true, nameSteps: true, caseAliases: true, personaForms: true,
             speakerColors: true, sheets: true, exceptions: [], journal: [], unmerged: [], caseAliasesAdded: [],
+            caseAliasesRemoved: [], caseAliasesMigrated: false,
         },
         // userWeatherWords: свой словарь погоды { тип: [слова] }; null — встроенный
         serviceValues: { enabled: true, weatherWords: true, weatherPrompt: true, timePrompt: true, userWeatherWords: null },

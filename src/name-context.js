@@ -20,6 +20,15 @@ function steps() {
 }
 
 /**
+ * Имена, скрытые из «Present Characters» этого чата, в нижнем регистре (DES сравнивает их так же).
+ * @param {import('./des-adapter.js').DesApi} des
+ * @returns {Set<string>}
+ */
+export function hiddenNames(des) {
+    return new Set(des.roster.available() ? asArray(des.roster.removed()).map((name) => String(name).toLowerCase()) : []);
+}
+
+/**
  * @param {import('./des-adapter.js').DesApi} des
  * @returns {import('./lib/russian-names.js').NameContext}
  */
@@ -36,8 +45,11 @@ export function buildNameContext(des) {
     const settings = getSettings().modules.names;
     const exceptions = new Set(asArray(settings.exceptions).map(normalizeRussianName));
     const unmerged = new Set(asArray(settings.unmerged).map(pairKey));
+    // Скрытые карточки — не цель склейки: среди них и формы имени игрока, из которых DES при загрузке чата делает NPC.
+    const hidden = hiddenNames(des);
     return {
-        npcCards: npc,
+        npcCards: npc.filter((name) => !hidden.has(name.toLowerCase())),
+        hiddenCards: npc.filter((name) => hidden.has(name.toLowerCase())),
         userCards: users,
         keyOf: desNameKey,
         cardKeys,

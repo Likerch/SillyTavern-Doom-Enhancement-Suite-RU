@@ -49,6 +49,14 @@ const TAG_BLOCK_RE = /<bunnymotags>([\s\S]*?)<\/bunnymotags>/i;
 const TAG_RE = /<([A-Za-z][A-Za-z0-9_\-]*):([^<>\n]+)>/g;
 /** Архетип MBTI без двоеточия: <ESFP-H>, <INTJ-U>. По нему срабатывают записи пака MBTI. */
 const MBTI_TAG_RE = /<([EI][NS][FT][JP]-[UH])>/gi;
+/**
+ * Заглушки шаблонов BunnyMo вместо значения тега и имени: <Name:NAME>, <GENRE:BLANK>, <Dere:NEW>, <GENDER:VALUE>.
+ * NONE и OLD — не заглушки: на <LING:NONE> и <LING:OLD> есть записи паков.
+ */
+const PLACEHOLDER_RE = /^(?:BLANK|NEW|VALUE|TARGET|NAME|NAME[\s_]HERE|PLACEHOLDER|TBD|X{3,})$/i;
+/** Обёртка записи BunnyMo: <BunnymoTags:Название>…</BunnymoTags:Название> — у основного лорбука и у части паков. */
+const WRAPPED_RE = /^<BunnymoTags:/i;
+const CYRILLIC = /\p{Script=Cyrillic}/u;
 
 /** @param {any} entry */
 function keysOf(entry) {
@@ -58,28 +66,30 @@ function keysOf(entry) {
 
 /**
  * Запись основного лорбука BunnyMo? По команде листа в ключах или по одной из известных записей.
+ * Обёртка <BunnymoTags:…> — не признак: в неё завёрнуты и записи паков (CarrotCast, LINGUISTICS, линзы).
  * @param {any} entry
  */
 export function isBunnyMoCoreEntry(entry) {
     const comment = String(entry?.comment ?? '');
     if (keysOf(entry).some((key) => BUNNYMO_ENTRIES.sheetCommands.includes(key.toLowerCase()))) return true;
-    if (/Master - |AUTO-TRIGGER:|AUTO-FILTRATION:|ANTI[\s-]*CLANKER|HawThorne Link/i.test(comment)) return true;
-    return /^<BunnymoTags:/i.test(String(entry?.content ?? '').trimStart());
+    return /Master - |AUTO-TRIGGER:|AUTO-FILTRATION:|ANTI[\s-]*CLANKER|HawThorne Link/i.test(comment);
 }
 
 /**
- * Какие лорбуки из сканирования относятся к BunnyMo: основной (по записям) и паки (по ключам-тегам).
+ * Какие лорбуки из сканирования относятся к BunnyMo: основной (по записям) и паки (по ключам-тегам или
+ * по обёртке записей BunnyMo).
  * @param {any[]} entries все записи текущего сканирования (у каждой есть `world`)
  * @returns {{ core: Set<string>, packs: Set<string> }}
  */
 export function classifyWorlds(entries) {
-    /** @type {Map<string, { core: number, keyed: number, tagged: number }>} */
+    /** @type {Map<string, { core: number, keyed: number, tagged: number, wrapped: number }>} */
     const stats = new Map();
     for (const entry of entries) {
         const world = String(entry?.world ?? '');
         if (!world) continue;
-        const item = stats.get(world) ?? { core: 0, keyed: 0, tagged: 0 };
+        const item = stats.get(world) ?? { core: 0, keyed: 0, tagged: 0, wrapped: 0 };
         if (isBunnyMoCoreEntry(entry)) item.core += 1;
+        if (WRAPPED_RE.test(String(entry?.content ?? '').trimStart())) item.wrapped += 1;
         const keys = keysOf(entry);
         if (keys.length) {
             item.keyed += 1;
@@ -91,7 +101,7 @@ export function classifyWorlds(entries) {
     const packs = new Set();
     for (const [world, item] of stats) {
         if (item.core >= 3) core.add(world);
-        else if (item.tagged >= 3 && item.tagged / Math.max(item.keyed, 1) >= 0.6) packs.add(world);
+        else if ((item.tagged >= 3 && item.tagged / Math.max(item.keyed, 1) >= 0.6) || item.wrapped >= 3) packs.add(world);
     }
     return { core, packs };
 }
@@ -117,16 +127,20 @@ export function packVocabulary(entries) {
 }
 
 /**
- * Архив персонажа: запись с блоком <BunnymoTags>, где есть теги (шаблон BunnyMo #43 или архив CarrotKernel).
+ * Архив персонажа: запись с блоком <BunnymoTags>, где есть имя или теги (архив CarrotKernel, пример BunnyMo #43).
+ * Не архивы — шаблоны листов основного лорбука (!fullsheet, !updatesheet: в их блоке <Name:NAME>, <…:BLANK>
+ * и примеры вроде <GENRE:ROMANCE>) и любой блок с именем-заглушкой.
  * @param {any} entry
  */
 export function isCharacterArchive(entry) {
-    const block = TAG_BLOCK_RE.exec(String(entry?.content ?? ''));
-    return Boolean(block && /<[A-Za-z][A-Za-z0-9_]*:[^<>\n]+>/.test(block[1]));
+    if (!TAG_BLOCK_RE.test(String(entry?.content ?? '')) || isBunnyMoCoreEntry(entry)) return false;
+    const { name, tags } = archiveTags(entry);
+    return name !== null ? !PLACEHOLDER_RE.test(name) : tags.length > 0;
 }
 
 /**
  * Теги персонажа из записи-архива: имя (из <Name:…>), теги <KEY:VALUE> и архетип MBTI (<ESFP-H>).
+ * Заглушки шаблонов (<GENRE:BLANK>, <Dere:NEW>) пропускаются.
  * @param {any} entry
  * @returns {{ name: string|null, tags: string[] }}
  */
@@ -139,8 +153,28 @@ export function archiveTags(entry) {
         const key = match[1].trim();
         const value = match[2].trim();
         if (key.toUpperCase() === 'NAME') name = value;
-        else tags.add(`<${key.toUpperCase()}:${value}>`);
+        else if (!PLACEHOLDER_RE.test(value)) tags.add(`<${key.toUpperCase()}:${value}>`);
     }
     for (const match of block[1].matchAll(MBTI_TAG_RE)) tags.add(`<${match[1].toUpperCase()}>`);
     return { name, tags: [...tags] };
+}
+
+/**
+ * Слова имён персонажей из архивов: <Name:…> и кириллические обычные ключи (нижний регистр, ё → е).
+ * Чтобы ключ одного архива не срабатывал на имя другого («Петров» → «Петрова»).
+ * @param {Iterable<any>} archives записи-архивы
+ * @returns {Set<string>}
+ */
+export function archiveNameWords(archives) {
+    const words = new Set();
+    /** @param {string} text */
+    const add = (text) => text.toLowerCase().replace(/ё/g, 'е').split(/[\s_]+/).filter(Boolean).forEach((word) => words.add(word));
+    for (const entry of archives) {
+        const { name } = archiveTags(entry);
+        if (name && !PLACEHOLDER_RE.test(name)) add(name);
+        for (const key of keysOf(entry)) {
+            if (CYRILLIC.test(key) && !/^\/[\s\S]+\/[gimsuy]*$/.test(key)) add(key);
+        }
+    }
+    return words;
 }

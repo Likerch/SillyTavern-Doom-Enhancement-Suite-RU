@@ -4,10 +4,13 @@
 // массивы на месте нельзя (они общие с кэшем). Правка детерминирована — ST считает по записи хэш для
 // «липкости» и перезарядки, и он должен совпадать от сканирования к сканированию.
 
-import { ANTI_CLANKER_RU, ARCHETYPE_FORMAT_FIX, ARCHETYPE_NOTE_RU, DETECTOR_STEMS_RU, ROBOTIC_STEMS_RU, stemsKey } from './bunnymo-ru.js';
-import { isRegexKey, nameFormsKey } from './regex-keys.js';
+import { ANTI_CLANKER_RU, ARCHETYPE_FORMAT_FIX, ARCHETYPE_NOTE_RU, DETECTOR_STEMS_RU, FEMALE_NAMES_LIKE_MALE_GENITIVE, ROBOTIC_STEMS_RU, stemsKey } from './bunnymo-ru.js';
+import { DIMINUTIVES, FULL_NAMES_BY_DIMINUTIVE } from './russian-diminutives.js';
+import { isRegexKey, nameFormsKey, outsideTagsKey } from './regex-keys.js';
 
 const CYRILLIC = /\p{Script=Cyrillic}/u;
+/** Известные имена (нижний регистр, ё → е): полные, уменьшительные и женские, похожие на родительный мужского. */
+const KNOWN_NAMES = new Set([...Object.keys(DIMINUTIVES), ...FULL_NAMES_BY_DIMINUTIVE.keys(), ...FEMALE_NAMES_LIKE_MALE_GENITIVE]);
 
 /**
  * @typedef {object} PatchSignatures признаки записей — из bunnymo-adapter.js
@@ -44,6 +47,32 @@ function addKey(entry, key) {
     if (keys.includes(key)) return false;
     entry.key = [...keys, key];
     return true;
+}
+
+/**
+ * Ключи записи, которые не срабатывают внутри тегов (см. outsideTagsKey): вставку тегов сцены ST сканирует
+ * вместе с текстом каждой записи, и «jealousy» иначе находился бы в <JEALOUSY:POSSESSIVE>. Новые массивы.
+ * @param {any} entry
+ */
+function keysOutsideTags(entry) {
+    const options = { caseSensitive: entry.caseSensitive === true, wholeWords: entry.matchWholeWords !== false };
+    for (const field of ['key', 'keysecondary']) {
+        if (!Array.isArray(entry[field]) || !entry[field].length) continue;
+        entry[field] = asKeys(entry[field]).map((key) => (key.trim() ? outsideTagsKey(key, options) : key));
+    }
+}
+
+/**
+ * Формы слова для ключа архива без чужих имён. Родительный мужского имени часто — женское имя
+ * («Александр» → «Александра», «Ян» → «Яна», «Ярослав» → «Ярослава»), а «Петров» → «Петрова» может быть
+ * фамилией другого архива: архив срабатывал бы на чужого персонажа. Такие формы отбрасываем; «Ивана» остаётся.
+ * @param {(word: string) => string[]} formsOf формы слова вместе с ним самим
+ * @param {ReadonlySet<string>} [takenNames] слова имён архивов этого сканирования (нижний регистр, ё → е)
+ * @returns {(word: string) => string[]}
+ */
+export function archiveFormsOf(formsOf, takenNames = new Set()) {
+    return (word) => formsOf(word).filter((form) => form === word
+        || !(KNOWN_NAMES.has(form) || takenNames.has(form) || (form.endsWith('слава') && !word.endsWith('слава'))));
 }
 
 /**
@@ -88,6 +117,8 @@ export function patchEntries(lists, options, signatures, helpers) {
             if (detector && options.detectors) {
                 // Только текст чата: иначе «panic» из библиотеки каомодзи включает детектор паники.
                 entry.excludeRecursion = true;
+                // И не теги сцены: на вставку для сканирования запрет рекурсии не действует.
+                keysOutsideTags(entry);
                 const key = detectorKeys.get(detector.id);
                 if (key) addKey(entry, key);
                 stats.detectors += 1;
@@ -95,6 +126,7 @@ export function patchEntries(lists, options, signatures, helpers) {
             }
             if (signatures.antiClanker.test(comment) && options.antiClanker) {
                 entry.excludeRecursion = true;
+                keysOutsideTags(entry);
                 addKey(entry, roboticKey);
                 if (signatures.antiClankerAlpha.test(comment) && typeof entry.content === 'string') entry.content = ANTI_CLANKER_RU;
                 stats.antiClanker += 1;

@@ -71,7 +71,8 @@ export const VALUES_RU = Object.freeze({
     },
     TRAIT: {
         спокойн: 'CALM', холодн: 'COLD', высокомерн: 'ARROGANT', надменн: 'ARROGANT', застенчив: 'SHY', робк: 'TIMID', добр: 'KIND',
-        жесток: 'CRUEL', злобн: 'MALICIOUS', хитр: 'CUNNING', умн: 'INTELLIGENT', любопытн: 'CURIOUS', храбр: 'BRAVE', смел: 'BOLD',
+        // «умн» — INTELLECTUAL, как в паке BunnTrAIts: INTELLIGENT в нём нет.
+        жесток: 'CRUEL', злобн: 'MALICIOUS', хитр: 'CUNNING', умн: 'INTELLECTUAL', любопытн: 'CURIOUS', храбр: 'BRAVE', смел: 'BOLD',
         трусл: 'COWARDLY', верн: 'LOYAL', преданн: 'DEVOTED', ленив: 'LAZY', амбициозн: 'AMBITIOUS', честолюбив: 'AMBITIOUS',
         упрям: 'STUBBORN', импульсивн: 'IMPULSIVE', вспыльчив: 'HOT_TEMPERED', тревожн: 'ANXIOUS', циничн: 'CYNICAL', саркастичн: 'SARCASTIC',
         игрив: 'PLAYFUL', весел: 'CHEERFUL', жизнерадостн: 'CHEERFUL', мрачн: 'GLOOMY', меланхоличн: 'MELANCHOLIC', заботлив: 'CARING',
