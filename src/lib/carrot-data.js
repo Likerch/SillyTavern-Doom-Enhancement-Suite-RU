@@ -35,6 +35,25 @@ export function findCharacter(entries, name, activeSources = new Set()) {
     return { name: best.name, data: best.data };
 }
 
+/** Короче — нельзя: CK ищет триггер подстрокой, и «ани» нашлось бы в «знания». */
+const MIN_RAG_TRIGGER = 5;
+
+/**
+ * Падежные формы имени для триггеров RAG CK. CK включает коллекцию листа, только если триггер — подстрока
+ * последних сообщений, поэтому лист «Шарлотта» не находится по «с Шарлоттой». Берём первое слово имени —
+ * так персонажа зовут в тексте; «ё» и «е» — оба написания; формы короче пяти букв пропускаем.
+ * @param {unknown} name
+ * @param {(word: string) => string[]} formsOf формы слова вместе с ним самим
+ * @returns {string[]} формы в нижнем регистре, без самого слова
+ */
+export function ragTriggerForms(name, formsOf) {
+    const first = String(name ?? '').trim().toLowerCase().split(/\s+/)[0];
+    if (!first || !/\p{Script=Cyrillic}/u.test(first)) return [];
+    const forms = new Set([...formsOf(first), ...formsOf(first.replace(/ё/g, 'е'))]);
+    forms.delete(first);
+    return [...forms].filter((form) => form.length >= MIN_RAG_TRIGGER && !form.includes(first));
+}
+
 /**
  * Блок, который CK в режиме показа «thinking» дописывает к ответу модели:
  * `<BunnyMoTags>` и внутри «Имя:» плюс строки «• КАТЕГОРИЯ: значения».

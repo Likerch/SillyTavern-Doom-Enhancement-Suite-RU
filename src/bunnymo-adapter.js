@@ -47,6 +47,8 @@ const PACK_KEY_RE = /^<([A-Za-z][A-Za-z0-9_\-]*)(?::([^<>]+))?>$/;
 /** Блок тегов персонажа: <BunnymoTags>…</BunnymoTags> (без двоеточия — с ним это обёртка записи BunnyMo). */
 const TAG_BLOCK_RE = /<bunnymotags>([\s\S]*?)<\/bunnymotags>/i;
 const TAG_RE = /<([A-Za-z][A-Za-z0-9_\-]*):([^<>\n]+)>/g;
+/** Архетип MBTI без двоеточия: <ESFP-H>, <INTJ-U>. По нему срабатывают записи пака MBTI. */
+const MBTI_TAG_RE = /<([EI][NS][FT][JP]-[UH])>/gi;
 
 /** @param {any} entry */
 function keysOf(entry) {
@@ -124,7 +126,7 @@ export function isCharacterArchive(entry) {
 }
 
 /**
- * Теги персонажа из записи-архива: имя (из <Name:…>) и теги <KEY:VALUE>.
+ * Теги персонажа из записи-архива: имя (из <Name:…>), теги <KEY:VALUE> и архетип MBTI (<ESFP-H>).
  * @param {any} entry
  * @returns {{ name: string|null, tags: string[] }}
  */
@@ -139,5 +141,6 @@ export function archiveTags(entry) {
         if (key.toUpperCase() === 'NAME') name = value;
         else tags.add(`<${key.toUpperCase()}:${value}>`);
     }
+    for (const match of block[1].matchAll(MBTI_TAG_RE)) tags.add(`<${match[1].toUpperCase()}>`);
     return { name, tags: [...tags] };
 }

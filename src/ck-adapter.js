@@ -271,6 +271,16 @@ function createCkApi(located, namespaces) {
         displayMode: () => String(settings().displayMode ?? CK_DISPLAY_MODES.thinking),
         ragEnabled: () => settings().rag?.enabled === true,
         ragSource: () => String(settings().rag?.vectorSource ?? ''),
+        /**
+         * Коллекции RAG CK — живой объект его настроек { id: { characterName, keywords, alwaysActive } } или `null`.
+         * `keywords` — триггеры: коллекция включается, если один из них — подстрока последних сообщений.
+         */
+        ragCollections: () => {
+            const metadata = settings().rag?.collectionMetadata;
+            return metadata && typeof metadata === 'object' ? metadata : null;
+        },
+        /** Сохранить настройки CK (после правки триггеров RAG). */
+        saveSettings: () => getContext().saveSettingsDebounced(),
         /** Живая карта CK «лорбук::имя» → { name, tags: Map, source, uid }. */
         scanned: () => state.scannedCharacters,
         /** Лорбуки, отмеченные в CK как архивы персонажей и библиотеки тегов. */

@@ -93,3 +93,8 @@ test('archive tags are read from the BunnymoTags block', () => {
     assert.deepEqual(archiveTags(entry), { name: 'Аня', tags: ['<SPECIES:HUMAN>', '<DERE:KUUDERE>'] });
     assert.ok(!isCharacterArchive(scan()[0][0]));
 });
+
+test('the MBTI archetype is a scene tag too, wrappers are not', () => {
+    const entry = { content: '<BunnymoTags><Name:Флоренс>, <PERSONALITY><Dere:Deredere>, <esfp-h>, </PERSONALITY> <ESFP-H></BunnymoTags>' };
+    assert.deepEqual(archiveTags(entry), { name: 'Флоренс', tags: ['<DERE:Deredere>', '<ESFP-H>'] });
+});

@@ -18,8 +18,9 @@ import { log } from '../log.js';
 import { getSettings, saveSettings } from '../settings.js';
 import { CK_CHAT, CK_DISPLAY_MODES, CK_INFO, CK_UI, inspectCk } from '../ck-adapter.js';
 import { DES_SELECTORS } from '../des-adapter.js';
-import { carrotDumpBodies, findCharacter, stripCarrotDumps, stripCarrotDumpsFromPrompt } from '../lib/carrot-data.js';
+import { carrotDumpBodies, findCharacter, ragTriggerForms, stripCarrotDumps, stripCarrotDumpsFromPrompt } from '../lib/carrot-data.js';
 import { renderTemplate } from '../lib/dictionary.js';
+import { wordForms } from '../lib/russian-names.js';
 import { createTranslator, downloadJson } from '../translator.js';
 import { menuButton } from '../ui.js';
 
@@ -27,6 +28,8 @@ const DICTIONARY_URL = new URL('../../locales/ru.carrotkernel.json', import.meta
 const CK_WAIT_MS = 30000;
 /** Модели эмбеддингов, которые понимают русский (подсказка для RAG CK). */
 const MULTILINGUAL_HINT = 'bge-m3, multilingual-e5, embed-multilingual-v3.0, text-embedding-3-*';
+/** Источник эмбеддингов «встроенные ST»: модель задаётся не в CK, а в config.yaml сервера. */
+const LOCAL_EMBEDDINGS = 'transformers';
 const NON_ASCII = /[^\x00-\x7F]/;
 
 const OPTIONS = [
@@ -44,6 +47,11 @@ const OPTIONS = [
         key: 'desButtons',
         title: 'CK не мешает DES',
         description: 'Без ложной кнопки импорта листа DES на ответах с дампом CK; пузыри и мысли DES возвращаются после того, как CK перерисует сообщение.',
+    },
+    {
+        key: 'ragForms',
+        title: 'RAG по падежам имени',
+        description: 'RAG CK подтягивает куски листа, только если имя персонажа стоит в последних сообщениях дословно. Модуль дописывает к триггерам листа падежные формы русского имени («Шарлотте», «Шарлоттой»).',
     },
     {
         key: 'translateUi',
@@ -65,7 +73,7 @@ let chatObserver = null;
 let dictionaryFailed = false;
 /** Лорбуки записей, сработавших в последнем сканировании: среди одноимённых персонажей — они. */
 let activeSources = new Set();
-const counters = { consistency: 0, dumps: 0, buttons: 0, restored: 0 };
+const counters = { consistency: 0, dumps: 0, buttons: 0, restored: 0, ragForms: 0 };
 /** @type {Set<() => void>} */
 const changeListeners = new Set();
 let notifyTimer = 0;
@@ -143,6 +151,37 @@ async function fixConsistency() {
     ck.setConsistencyText(text);
     counters.consistency += 1;
     log.info(`CarrotKernel: вставка тегов пересобрана для ${names.join(', ')} — CK путает кириллические имена.`);
+    notifyChange();
+}
+
+/**
+ * Триггеры коллекций RAG CK: падежные формы русского имени персонажа. Формы, которые пользователь сам убрал
+ * из триггеров в CK, не возвращаем — для этого помним, что дописывали.
+ */
+function ensureRagTriggerForms() {
+    if (!ck || !option('ragForms') || !ck.ragEnabled()) return;
+    const collections = ck.ragCollections();
+    if (!collections) return;
+    const settings = moduleSettings();
+    const added = settings.ragFormsAdded && typeof settings.ragFormsAdded === 'object' ? settings.ragFormsAdded : {};
+    let total = 0;
+    for (const [id, meta] of Object.entries(collections)) {
+        if (!meta || typeof meta !== 'object' || !meta.characterName) continue;
+        const keywords = Array.isArray(meta.keywords) ? meta.keywords : [];
+        const ours = new Set(Array.isArray(added[id]) ? added[id] : []);
+        const missing = ragTriggerForms(meta.characterName, (word) => wordForms(word, { genitive: true }))
+            .filter((form) => !ours.has(form) && !keywords.some((keyword) => String(keyword).toLowerCase() === form));
+        if (!missing.length) continue;
+        meta.keywords = [...keywords, ...missing];
+        added[id] = [...ours, ...missing];
+        total += missing.length;
+    }
+    if (!total) return;
+    settings.ragFormsAdded = added;
+    saveSettings();
+    ck.saveSettings();
+    counters.ragForms += total;
+    log.info(`CarrotKernel: к триггерам RAG дописаны падежные формы имён (${total}).`);
     notifyChange();
 }
 
@@ -367,7 +406,7 @@ function mountSection(section) {
         else if (!ck) lines.push('CarrotKernel недоступен — причина в замечаниях модуля выше.');
         else {
             lines.push(`${facts.name} · v${facts.version ?? '?'} · режим показа «${ck.displayMode()}».`);
-            lines.push(`Вставок тегов пересобрано: ${counters.consistency}; дампов вырезано из промпта: ${counters.dumps}; ложных кнопок DES убрано: ${counters.buttons}; сообщений с возвращёнными украшениями DES: ${counters.restored}.`);
+            lines.push(`Вставок тегов пересобрано: ${counters.consistency}; дампов вырезано из промпта: ${counters.dumps}; ложных кнопок DES убрано: ${counters.buttons}; сообщений с возвращёнными украшениями DES: ${counters.restored}; форм имён в триггерах RAG: ${counters.ragForms}.`);
         }
         for (const line of lines) list.append(Object.assign(document.createElement('li'), { textContent: line }));
         stats.textContent = translator.running
@@ -426,13 +465,17 @@ export default {
         subscribe('makeFirst', eventTypes.WORLD_INFO_ACTIVATED, rememberSources);
         const fix = subscribe('makeLast', eventTypes.WORLD_INFO_ACTIVATED, fixConsistency);
         subscribe('makeFirst', eventTypes.GENERATION_STARTED, () => getContext().eventSource.makeLast(eventTypes.WORLD_INFO_ACTIVATED, fix));
+        // RAG CK выбирает коллекции в своём перехватчике генерации — он идёт после GENERATION_STARTED.
+        subscribe('on', eventTypes.GENERATION_STARTED, ensureRagTriggerForms);
         subscribe('on', eventTypes.CHAT_COMPLETION_PROMPT_READY, stripFromChatCompletion);
         subscribe('on', eventTypes.GENERATE_AFTER_COMBINE_PROMPTS, stripFromTextCompletion);
         subscribe('on', eventTypes.CHAT_CHANGED, () => {
             observeChat();
             translator.refreshChat();
+            ensureRagTriggerForms();
         });
         observeChat();
+        ensureRagTriggerForms();
         await startTranslator();
         notifyChange();
         log.info(`Модуль 6 (CarrotKernel) включён: ${facts.name} v${facts.version ?? '?'}.`);
@@ -483,7 +526,9 @@ export default {
         if (ck.displayMode() === CK_DISPLAY_MODES.thinking) {
             notes.push({ level: 'warn', text: 'Режим показа CK — «thinking»: он дописывает дамп тегов к каждому ответу. Модуль убирает его из промпта и не даёт DES ставить кнопку импорта, но проще выбрать в настройках CK режим «none» — теги всё равно уходят модели.' });
         }
-        if (ck.ragEnabled() && !/multilingual|bge-m3|e5|text-embedding-3/i.test(ck.ragSource())) {
+        if (ck.ragEnabled() && ck.ragSource() === LOCAL_EMBEDDINGS) {
+            notes.push({ level: 'info', text: 'RAG CK — на встроенных эмбеддингах ST: модель задаётся в config.yaml сервера (extensions.models.embedding). Для русских листов нужна многоязычная, например Xenova/multilingual-e5-small; английская по умолчанию ищет плохо.' });
+        } else if (ck.ragEnabled() && !/multilingual|bge-m3|e5|text-embedding-3/i.test(ck.ragSource())) {
             notes.push({ level: 'info', text: `RAG CK включён: для русских листов нужна многоязычная модель эмбеддингов (${MULTILINGUAL_HINT}), английская ищет плохо.` });
         }
         if (dictionaryFailed) notes.push({ level: 'warn', text: 'Словарь интерфейса CK не загрузился — переводятся только строки из своего словаря.' });

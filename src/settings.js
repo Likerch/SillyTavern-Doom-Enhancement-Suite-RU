@@ -21,7 +21,11 @@ export const DEFAULT_SETTINGS = {
         serviceValues: { enabled: true, weatherWords: true, weatherPrompt: true, timePrompt: true, userWeatherWords: null },
         fixes: { enabled: true, fieldKeys: true, offScene: true, noQuest: true, keepTranslations: true },
         bunnymo: { enabled: true, languageLock: true, detectors: true, antiClanker: true, archetypes: true, archiveKeys: true, normalizer: true, packTags: true },
-        carrotKernel: { enabled: true, cyrillicNames: true, dumpFilter: true, desButtons: true, translateUi: true, toasts: true, collect: true, userDictionary: {} },
+        // ragFormsAdded: { id коллекции RAG CK: формы имени, которые модуль дописал в её триггеры }
+        carrotKernel: {
+            enabled: true, cyrillicNames: true, dumpFilter: true, desButtons: true, ragForms: true, translateUi: true, toasts: true, collect: true,
+            userDictionary: {}, ragFormsAdded: {},
+        },
     },
 };
 

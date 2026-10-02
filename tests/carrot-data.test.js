@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { carrotDumpBodies, characterNameKey, findCharacter, isCarrotDumpBody, stripCarrotDumps, stripCarrotDumpsFromPrompt } from '../src/lib/carrot-data.js';
+import { carrotDumpBodies, characterNameKey, findCharacter, isCarrotDumpBody, ragTriggerForms, stripCarrotDumps, stripCarrotDumpsFromPrompt } from '../src/lib/carrot-data.js';
+import { wordForms } from '../src/lib/russian-names.js';
 
 const scanned = () => new Map([
     ['Архив::Аня', { name: 'Аня', source: 'Архив', tags: new Map([['SPECIES', ['HUMAN']]]) }],
@@ -46,4 +47,15 @@ test('dump remnants are stripped from the prompt even after an HTML-cleaning reg
     assert.deepEqual(stripCarrotDumpsFromPrompt('Ответ.\nАня:\n• SPECIES: ELF\n\nБорис:\n', bodies), { text: 'Ответ.', removed: 1 });
     assert.deepEqual(stripCarrotDumpsFromPrompt(chat[0].mes, bodies), { text: 'Ответ.', removed: 1 });
     assert.deepEqual(stripCarrotDumpsFromPrompt('Аня: привет', bodies), { text: 'Аня: привет', removed: 0 });
+});
+
+test('RAG triggers get case forms of a Russian name, but no short or redundant ones', () => {
+    const forms = (word) => wordForms(word, { genitive: true });
+    assert.deepEqual(ragTriggerForms('Шарлотта Клеймор', forms).sort(), ['шарлотте', 'шарлотту', 'шарлотты', 'шарлоттой', 'шарлоттою'].sort());
+    // «Флоренсу» и так содержит «флоренс» — дописывать нечего.
+    assert.deepEqual(ragTriggerForms('Флоренс', forms), []);
+    // «ани», «ане» нашлись бы внутри других слов.
+    assert.deepEqual(ragTriggerForms('Аня', forms), []);
+    assert.ok(ragTriggerForms('Алёна', forms).includes('алены'));
+    assert.deepEqual(ragTriggerForms('Atsu Ibn Oba', forms), []);
 });
