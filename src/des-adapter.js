@@ -386,6 +386,36 @@ export function hasDesOffSceneMarker(text) {
     return /\boff[\s-]?scene\b/i.test(String(text ?? ''));
 }
 
+/** @param {unknown} sheet */
+const sheetImportedAt = (sheet) => Date.parse(/** @type {any} */ (sheet)?.importedAt ?? '') || 0;
+
+/**
+ * Переложить лист в хранилище листов чата DES (`characterSheets`) под другое имя. Ключи DES сравнивает без
+ * учёта регистра. Если лист под этим именем уже есть, более новый импорт (`importedAt`) ложится поверх, как
+ * повторный импорт у DES (`importFullSheetFromMessage`): заметки остаются, а теги — только из нового листа.
+ * Лист старее — не трогаем.
+ * @param {Record<string, any>} store
+ * @param {string} from
+ * @param {string} to
+ * @returns {'moved'|'merged'|null}
+ */
+export function moveDesSheet(store, from, to) {
+    if (!store || !(from in store) || from === to) return null;
+    const target = Object.keys(store).find((key) => key.toLowerCase() === String(to).toLowerCase());
+    if (target === from) return null;
+    const sheet = store[from];
+    if (target === undefined) {
+        store[to] = sheet;
+    } else {
+        if (!(sheetImportedAt(sheet) > sheetImportedAt(store[target]))) return null;
+        const merged = { ...store[target], ...sheet };
+        if (!sheet?.rawTags) delete merged.rawTags;
+        store[target] = merged;
+    }
+    delete store[from];
+    return target === undefined ? 'moved' : 'merged';
+}
+
 /**
  * @typedef {object} DesFacts
  * @property {boolean} found          DES есть среди расширений ST
@@ -916,15 +946,15 @@ function createApi(located, namespaces) {
             },
             /** Живой объект { имя: лист } этого чата или `null`. */
             store: () => getContext().chatMetadata?.[DES_KEYS.chatMetadata]?.[DES_KEYS.characterSheets] ?? null,
-            /** Переложить лист под другое имя (если под ним листа ещё нет) и сохранить чат. */
+            /**
+             * Переложить лист под другое имя и сохранить чат; лист под тем именем обновляется, только если
+             * этот новее (moveDesSheet). @returns {'moved'|'merged'|null}
+             */
             rename(from, to) {
                 const store = getContext().chatMetadata?.[DES_KEYS.chatMetadata]?.[DES_KEYS.characterSheets];
-                if (!store || !(from in store) || from === to) return false;
-                if (Object.keys(store).some((key) => key.toLowerCase() === String(to).toLowerCase())) return false;
-                store[to] = store[from];
-                delete store[from];
-                attempt('сохранение чата', () => persistence.saveChatData());
-                return true;
+                const result = moveDesSheet(store, from, to);
+                if (result) attempt('сохранение чата', () => persistence.saveChatData());
+                return result;
             },
         }),
 

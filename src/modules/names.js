@@ -18,7 +18,7 @@ import { log } from '../log.js';
 import { getSettings, saveSettings } from '../settings.js';
 import { DES_KEYS, DES_SELECTORS, desCharacterNameField, desNameKey } from '../des-adapter.js';
 import { buildNameContext, pairKey } from '../name-context.js';
-import { decideName, findCaseDuplicates, normalizeRussianName, wordForms } from '../lib/russian-names.js';
+import { decideName, decideSheetOwner, findCaseDuplicates, normalizeRussianName, wordForms } from '../lib/russian-names.js';
 import { NAME_INSTRUCTION_RU, replaceExact } from '../lib/service-prompt.js';
 import { bestAdjacentSpeaker, messageFontColors, namePattern } from '../lib/speaker-colors.js';
 import { menuButton } from '../ui.js';
@@ -28,11 +28,14 @@ const JOURNAL_LIMIT = 200;
 const MODE_NAMES = Object.freeze({ together: 'Вместе с ответом', separate: 'Отдельным запросом', external: 'Внешний API' });
 /** Как часто проверять, закрыт ли Workshop, пока он мог затереть наши алиасы. */
 const WORKSHOP_POLL_MS = 2000;
-/** Через сколько после клика «Импорт листа» смотреть, под каким именем DES его сохранил. */
-const SHEET_IMPORT_DELAY_MS = 1500;
+/** Сколько ждать, пока в попапе импорта листа DES подтвердят имя. */
+const SHEET_IMPORT_WAIT_MS = 5 * 60 * 1000;
+/** Как часто смотреть, не сохранил ли DES импортированный лист. */
+const SHEET_IMPORT_POLL_MS = 500;
 const VIA_NAMES = Object.freeze({
     'падеж': 'падеж', 'падеж алиаса': 'падеж алиаса', 'звание или обращение': 'звание', 'часть имени': 'часть имени',
-    'уменьшительное': 'уменьшительное', 'транслит': 'транслит',
+    'уменьшительное': 'уменьшительное', 'транслит': 'транслит', 'алиас': 'алиас', 'без пояснения': 'без пояснения',
+    'полное имя': 'полное имя',
 });
 
 const OPTIONS = [
@@ -69,7 +72,7 @@ const OPTIONS = [
     {
         key: 'sheets',
         title: 'Листы под именем карточки',
-        description: 'Лист BunnyMo, который DES сохранил под формой имени или алиасом («Дарган»), перекладывается под имя карточки — его видно в Workshop и на портрете.',
+        description: 'Лист BunnyMo, который DES сохранил под формой имени, алиасом или полным именем из листа («Флоренс Клеймор (урождённая Блэкени)» при карточке «Флоренс»), перекладывается под имя карточки — его видно на портрете. Повторный импорт обновляет лист карточки.',
     },
 ];
 
@@ -394,8 +397,12 @@ function onSeparateTrackerDone() {
 
 // ─── Листы ─────────────────────────────────────────────────────────────────
 
-/** Листы, сохранённые под формой имени или алиасом, — под имя карточки (если там листа ещё нет). */
-function rekeySheets() {
+/**
+ * Листы, сохранённые под формой имени, алиасом или полным именем из листа, — под имя карточки. Если у карточки
+ * лист уже есть, его обновляет только более новый импорт (как повторный импорт у DES).
+ * @param {ReadonlySet<string>} [fresh] только что импортированные листы: о них — уведомление
+ */
+function rekeySheets(fresh = new Set()) {
     const des = env?.des;
     if (!des || !option('sheets') || !des.sheets.available()) return;
     const store = des.sheets.store();
@@ -406,14 +413,30 @@ function rekeySheets() {
     let moved = 0;
     for (const key of Object.keys(store)) {
         if (npc.includes(key)) continue;
-        let canonical = Object.entries(aliases).find(([, list]) => includesName(list, key))?.[0] ?? null;
+        let canonical = Object.entries(aliases).find(([card, list]) => npc.includes(card) && includesName(list, key))?.[0] ?? null;
+        let via = 'алиас';
         if (!canonical) {
-            const decision = decideName(key, context);
-            canonical = decision.action === 'alias' ? decision.canonical : null;
+            const decision = decideSheetOwner(key, context);
+            if (decision.action !== 'alias') {
+                if (fresh.has(key) && decision.action === 'skip' && decision.candidates) {
+                    log.info(`Имена: лист «${key}» подходит нескольким карточкам (${decision.candidates.join(', ')}) — оставляю под этим именем.`);
+                }
+                continue;
+            }
+            ({ canonical, via } = decision);
         }
-        if (!canonical || !des.sheets.rename(key, canonical)) continue;
+        const result = des.sheets.rename(key, canonical);
+        if (!result) {
+            if (fresh.has(key)) log.info(`Имена: у карточки «${canonical}» уже есть лист не старше «${key}» — оставляю оба как есть.`);
+            continue;
+        }
         moved += 1;
-        log.info(`Имена: лист «${key}» переложен под карточку «${canonical}».`);
+        log.info(`Имена: лист «${key}» ${result === 'merged' ? 'обновил лист карточки' : 'переложен под карточку'} «${canonical}» (${VIA_NAMES[via] ?? via}).`);
+        if (fresh.has(key)) {
+            notify('success', result === 'merged'
+                ? `Лист карточки «${canonical}» обновлён — DES записал его как «${key}».`
+                : `Лист перенесён к карточке «${canonical}» — DES записал его как «${key}».`);
+        }
     }
     if (moved) {
         counters.sheets += moved;
@@ -421,7 +444,42 @@ function rekeySheets() {
     }
 }
 
+function stopSheetWatch() {
+    clearInterval(sheetTimer);
+    sheetTimer = 0;
+}
+
+/**
+ * Клик «Импорт листа»: DES спрашивает имя в попапе и сохраняет лист только после ответа. Ждём, пока какой-то
+ * лист появится или обновится (DES кладёт новый объект), и сразу перекладываем его под карточку.
+ */
+function watchSheetImport() {
+    const des = env?.des;
+    if (!des || !option('sheets') || !des.sheets.available()) return;
+    stopSheetWatch();
+    const before = new Map(Object.entries(des.sheets.store() ?? {}));
+    const until = Date.now() + SHEET_IMPORT_WAIT_MS;
+    sheetTimer = setInterval(() => {
+        try {
+            const fresh = Object.entries(env?.des?.sheets.store() ?? {})
+                .filter(([key, sheet]) => before.get(key) !== sheet)
+                .map(([key]) => key);
+            if (fresh.length) {
+                stopSheetWatch();
+                rekeySheets(new Set(fresh));
+            } else if (Date.now() > until) {
+                stopSheetWatch();
+            }
+        } catch (error) {
+            stopSheetWatch();
+            log.warn('Имена: не удалось проверить импортированный лист', error);
+        }
+    }, SHEET_IMPORT_POLL_MS);
+}
+
 function onChatChanged() {
+    // Импорт, которого ждали, был в прошлом чате.
+    stopSheetWatch();
     ensureCaseAliases();
     reconcileJournal();
     rekeySheets();
@@ -620,14 +678,7 @@ export default {
         subscribe('on', eventTypes.CHAT_CHANGED, onChatChanged);
         importClickHandler = (event) => {
             if (!(event.target instanceof Element) || !event.target.closest(DES_SELECTORS.importButton)) return;
-            clearTimeout(sheetTimer);
-            sheetTimer = setTimeout(() => {
-                try {
-                    rekeySheets();
-                } catch (error) {
-                    log.warn('Имена: не удалось проверить импортированный лист', error);
-                }
-            }, SHEET_IMPORT_DELAY_MS);
+            watchSheetImport();
         };
         document.addEventListener('click', importClickHandler, true);
         onChatChanged();
@@ -641,7 +692,7 @@ export default {
         importClickHandler = null;
         clearInterval(workshopTimer);
         workshopTimer = 0;
-        clearTimeout(sheetTimer);
+        stopSheetWatch();
         env = null;
         notifyChange();
         log.info('Модуль 2 (имена) выключен.');

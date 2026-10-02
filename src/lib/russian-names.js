@@ -339,6 +339,81 @@ export function decideName(name, context) {
     return { action: 'skip', reason: 'не похоже ни на одну карточку' };
 }
 
+// ─── Листы ─────────────────────────────────────────────────────────────────
+
+/** Пояснения к имени в листе: в скобках и прозвище в кавычках. */
+const NAME_NOTES = /\([^)]*\)|\[[^\]]*\]|«[^»]*»|"[^"]*"|“[^”]*”|„[^“”]*[“”]/g;
+/** Всё после запятой, косой черты или тире с пробелами — тоже пояснение: «Флоренс Клеймор, капитан». */
+const NAME_TAIL = /\s[—–-]\s|[,;/|]/;
+
+/**
+ * Имя из листа без пояснений: «Флоренс Клеймор (урождённая Блэкени)» → «Флоренс Клеймор»,
+ * «Флоренс «Фло» Клеймор, капитан» → «Флоренс Клеймор». Снимать нечего — то же имя.
+ * @param {unknown} name
+ */
+export function bareSheetName(name) {
+    const raw = String(name ?? '').replace(/\*+/g, '').replace(/\s+/g, ' ').trim();
+    const bare = raw.replace(NAME_NOTES, ' ').replace(/\s*[([].*$/, '').split(NAME_TAIL)[0].replace(/\s+/g, ' ').trim();
+    return bare || raw;
+}
+
+/** Слова имени для сравнения листа с карточкой: без званий, частиц и суффиксов обращения. */
+function significantWords(name) {
+    return lowerWords(name)
+        .map((word) => word.replace(HONORIFIC_SUFFIX, ''))
+        .filter((word) => word && !TITLES.has(word.replace(/ё/g, 'е')) && !NAME_PARTICLES.has(word));
+}
+
+/**
+ * Чей лист. DES сохраняет лист под именем, которое подставил из самого листа, а оно бывает полнее карточки:
+ * «Флоренс Клеймор (урождённая Блэкени)» при карточке «Флоренс». По очереди: как имя из трекера (decideName),
+ * то же без пояснений и, наконец, карточка, все слова которой есть в имени из листа. Из таких берём самую
+ * полную («Флоренс Клеймор» раньше «Флоренс»); две равные («Флоренс» и «Клеймор») — решать пользователю.
+ * @param {string} name
+ * @param {NameContext} context
+ * @returns {NameDecision}
+ */
+export function decideSheetOwner(name, context) {
+    const raw = String(name ?? '').trim();
+    const direct = decideName(raw, context);
+    if (direct.action !== 'skip' || direct.candidates) return direct;
+    const bare = bareSheetName(raw);
+    const users = context.userCards ?? [];
+    /** @param {string} canonical @param {string} via @returns {NameDecision} */
+    const owner = (canonical, via) => {
+        const reason = context.excluded(raw, canonical) ?? context.excluded(bare, canonical);
+        return reason ? { action: 'skip', reason } : { action: 'alias', canonical, via };
+    };
+    if (bare !== raw) {
+        if (users.includes(bare)) return { action: 'skip', reason: 'лист персонажа пользователя' };
+        if (context.npcCards.includes(bare)) return owner(bare, 'без пояснения');
+        const decision = decideName(bare, context);
+        if (decision.action === 'alias') return owner(decision.canonical, decision.via);
+        if (decision.action !== 'skip' || decision.candidates) return decision;
+    }
+
+    // Полное имя при короткой карточке: все слова карточки есть в имени из листа.
+    const words = significantWords(bare);
+    if (words.length < 2) return direct;
+    const translit = context.steps?.translit !== false;
+    /** @param {string} a @param {string} b */
+    const same = (a, b) => a.replace(/ё/g, 'е') === b.replace(/ё/g, 'е') || (translit && sameWordAcrossScripts(a, b));
+    /** @param {string} card @returns {number} сколько слов карточки нашлось; 0 — не все */
+    const fit = (card) => {
+        const cardWords = significantWords(card);
+        const all = cardWords.length > 0 && cardWords.every((word) => words.some((own) => same(own, word)));
+        return all ? cardWords.length : 0;
+    };
+    const personas = [...new Set(users)].filter((card) => fit(card) > 0);
+    if (personas.length) return { action: 'skip', reason: 'похоже на персонажа пользователя', candidates: personas };
+    const scored = [...new Set(context.npcCards)].map((card) => ({ card, score: fit(card) })).filter(({ score }) => score > 0);
+    if (!scored.length) return direct;
+    const best = Math.max(...scored.map(({ score }) => score));
+    const top = scored.filter(({ score }) => score === best).map(({ card }) => card);
+    if (top.length > 1) return { action: 'skip', reason: 'подходит нескольким карточкам', candidates: top };
+    return owner(top[0], 'полное имя');
+}
+
 /**
  * Карточки, которые уже стали падежными дублями другой карточки («Аней» при «Аня»): DES завёл их
  * раньше, модуль склеивает только новые имена. Только для предупреждения.

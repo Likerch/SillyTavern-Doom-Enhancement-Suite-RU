@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideName, findCaseDuplicates, isCaseFormOf, normalizeRussianName, wordForms } from '../src/lib/russian-names.js';
+import { bareSheetName, decideName, decideSheetOwner, findCaseDuplicates, isCaseFormOf, normalizeRussianName, wordForms } from '../src/lib/russian-names.js';
 
 const FORMS = {
     'Аня': ['Ани', 'Ане', 'Аню', 'Аней', 'Анею'],
@@ -185,4 +185,51 @@ test('word forms with the genitive are available for text search', () => {
     assert.ok(wordForms('павел', { genitive: true }).includes('павла'));
     assert.ok(wordForms('василий', { genitive: true }).includes('василия'));
     assert.deepEqual(wordForms('акари'), ['акари']);
+});
+
+test('notes are stripped from a sheet name', () => {
+    assert.equal(bareSheetName('Флоренс Клеймор (урождённая Блэкени)'), 'Флоренс Клеймор');
+    assert.equal(bareSheetName('Флоренс «Фло» Клеймор, капитан команды'), 'Флоренс Клеймор');
+    assert.equal(bareSheetName('**Флоренс Клеймор** — бариста'), 'Флоренс Клеймор');
+    assert.equal(bareSheetName('Флоренс / Florence'), 'Флоренс');
+    assert.equal(bareSheetName('Флоренс Клеймор (урождённая'), 'Флоренс Клеймор');
+    assert.equal(bareSheetName('Анна-Мария Клеймор'), 'Анна-Мария Клеймор');
+    assert.equal(bareSheetName('(Флоренс)'), '(Флоренс)');
+});
+
+test('a sheet saved under a fuller name goes to the short card', () => {
+    const ctx = context({ npc: ['Флоренс', 'Шарлотта'] });
+    assert.deepEqual(decideSheetOwner('Флоренс Клеймор (урождённая Блэкени)', ctx), { action: 'alias', canonical: 'Флоренс', via: 'полное имя' });
+    assert.equal(decideSheetOwner('Шарлотта Клеймор', ctx).canonical, 'Шарлотта');
+    assert.equal(decideSheetOwner('Леди Флоренс Клеймор', ctx).canonical, 'Флоренс');
+    // Восточный порядок: фамилия первой.
+    assert.equal(decideSheetOwner('Ямада Акари', context({ npc: ['Акари'] })).canonical, 'Акари');
+    assert.equal(decideSheetOwner('Florence Claymore', context({ npc: ['Florence'] })).canonical, 'Florence');
+    // Без пояснения — ровно карточка.
+    assert.deepEqual(decideSheetOwner('Флоренс Клеймор (урождённая Блэкени)', context({ npc: ['Флоренс Клеймор', 'Флоренс'] })),
+        { action: 'alias', canonical: 'Флоренс Клеймор', via: 'без пояснения' });
+    assert.equal(decideSheetOwner('Аня (младшая сестра)', context({ npc: ['Аня'] })).canonical, 'Аня');
+    // Как в трекере: падеж и часть имени по-прежнему работают.
+    assert.equal(decideSheetOwner('Аней', context({ npc: ['Аня'] })).canonical, 'Аня');
+    assert.equal(decideSheetOwner('Аня', context({ npc: ['Аня Петрова'] })).canonical, 'Аня Петрова');
+});
+
+test('a fuller sheet name prefers the fullest card and leaves real ambiguity alone', () => {
+    assert.equal(decideSheetOwner('Флоренс Клеймор Младшая', context({ npc: ['Флоренс', 'Флоренс Клеймор'] })).canonical, 'Флоренс Клеймор');
+    const family = decideSheetOwner('Флоренс Клеймор', context({ npc: ['Флоренс', 'Клеймор'] }));
+    assert.equal(family.action, 'skip');
+    assert.deepEqual(family.candidates.sort(), ['Клеймор', 'Флоренс']);
+    assert.equal(decideSheetOwner('Флоренс Клеймор', context({ npc: ['Шарлотта'] })).action, 'skip');
+    assert.equal(decideSheetOwner('Флоренс', context({ npc: ['Шарлотта'] })).action, 'skip');
+    // Слово карточки должно стоять в имени целиком: «Флор» — не «Флоренс».
+    assert.equal(decideSheetOwner('Флоренс Клеймор', context({ npc: ['Флор'] })).action, 'skip');
+});
+
+test('sheet owners respect exceptions and the player character', () => {
+    const excluded = (variant) => (normalizeRussianName(variant) === 'флоренс клеймор (урожденная блэкени)' ? 'в исключениях' : null);
+    assert.equal(decideSheetOwner('Флоренс Клеймор (урождённая Блэкени)', context({ npc: ['Флоренс'], excluded })).reason, 'в исключениях');
+    const ctx = context({ npc: ['Флоренс'], users: ['Артур'] });
+    ctx.userCards = ['Артур'];
+    assert.equal(decideSheetOwner('Артур Клеймор', ctx).action, 'skip');
+    assert.equal(decideSheetOwner('Флоренс Клеймор', ctx).canonical, 'Флоренс');
 });
