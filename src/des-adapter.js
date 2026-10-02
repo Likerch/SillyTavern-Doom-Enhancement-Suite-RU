@@ -6,7 +6,7 @@
  *
  * Сверено с DES 2.6.0 (коммит 10ad241) на SillyTavern 1.19.0.
  */
-import { getContext, importSt } from './st.js';
+import { findExtensionScript, getContext, listExtensionNames } from './st.js';
 import { log } from './log.js';
 
 export const DES_INFO = Object.freeze({
@@ -26,6 +26,13 @@ export const DES_SELECTORS = Object.freeze({
     fab: '#dooms-settings-fab',
     /** Первый корень template.html: по нему видно, что DES вставил ленивые окна в <body>. */
     templateMarker: '#rpg-settings-popup',
+    /** Workshop открыт: черновик держит снимок алиасов и при сохранении пишет массив целиком (characterWorkshop.js). */
+    workshopOpen: '#character-workshop-popup.is-open',
+    /** Кнопка импорта листа BunnyMo в ряду кнопок сообщения (fullsheetButtons.js). */
+    importButton: '.dooms-import-fullsheet-btn',
+    /** Разметка пузырей внутри .mes_text и атрибут «пузыри уже разложены» на нём (chatBubbles.js). */
+    bubbles: '.dooms-bubbles',
+    bubblesAppliedAttribute: 'data-dooms-bubbles-applied',
     /**
      * Корни template.html и их ключевые узлы. Шаблон вставляется в <body> целиком
      * при первом открытии любого окна DES, поэтому проверяются все сразу.
@@ -59,7 +66,10 @@ export const DES_UI = Object.freeze({
     /** Лента сообщений: здесь следим с subtree, но разбираем только корни DES из `chatRoots`. */
     chat: '#chat',
     /** Блок DES в Extensions — анонимный div; находим его по переключателю. */
-    drawerOf: (toggle) => toggle.closest('.inline-drawer')?.parentElement ?? null,
+    drawer: Object.freeze({
+        toggle: '#rpg-extension-enabled',
+        rootOf: (toggle) => toggle.closest('.inline-drawer')?.parentElement ?? null,
+    }),
 
     roots: Object.freeze([
         // template.html: модалки, вставляются в <body> один раз
@@ -189,6 +199,7 @@ export const DES_UI = Object.freeze({
  * ES-модули DES, которые нужны модулям 2–4, и экспорты, без которых они не работают.
  * Все они статически импортируются в index.js DES, поэтому к нашему импорту уже загружены:
  * мы получаем те же экземпляры и не запускаем код DES повторно.
+ * `optional` — без них гард пропускает данные, но отключается одна функция (раскраска, листы и т. п.).
  */
 export const DES_MODULES = Object.freeze({
     state: { path: 'src/core/state.js', exports: { extensionSettings: 'object', lastGeneratedData: 'object', committedTrackerData: 'object' } },
@@ -199,6 +210,21 @@ export const DES_MODULES = Object.freeze({
     portraitBar: { path: 'src/systems/ui/portraitBar.js', exports: { updatePortraitBar: 'function', clearPortraitCache: 'function' } },
     thoughts: { path: 'src/systems/rendering/thoughts.js', exports: { updateChatThoughts: 'function' } },
     sceneHeaders: { path: 'src/systems/rendering/sceneHeaders.js', exports: { updateChatSceneHeaders: 'function', resetSceneHeaderCache: 'function' } },
+    roster: {
+        path: 'src/core/persistence.js',
+        exports: { getActiveCharacterColors: 'function', getActiveRemovedCharacters: 'function', saveCharacterRosterChange: 'function' },
+        optional: true,
+    },
+    bubbles: {
+        path: 'src/systems/rendering/chatBubbles.js',
+        exports: { applyChatBubbles: 'function', clearBubbleState: 'function', revertLastMessageBubbles: 'function' },
+        optional: true,
+    },
+    fullsheet: {
+        path: 'src/systems/ui/fullsheetButtons.js',
+        exports: { messageHasFullSheet: 'function', injectFullSheetButtonForMessage: 'function' },
+        optional: true,
+    },
 });
 
 export const DES_KEYS = Object.freeze({
@@ -210,6 +236,10 @@ export const DES_KEYS = Object.freeze({
     updateCompleteEvent: 'dooms_tracker_update_complete',
     /** Режим, в котором трекер пишется в основном ответе модели и проходит через extension-промпт. */
     togetherMode: 'together',
+    /** chat_metadata[chatMetadata][...]: импортированные листы персонажей { имя: лист } (characterSheet.js). */
+    characterSheets: 'characterSheets',
+    /** Пузыри чата выключены (settings.chatBubbleMode). */
+    bubblesOff: 'off',
 });
 
 /** Слоты extension-промптов ST, которые пишет DES. */
@@ -366,6 +396,7 @@ export function hasDesOffSceneMarker(text) {
  * @property {boolean|null} ownEnabled собственный переключатель DES (`null` — неизвестно)
  * @property {string[]} missingSelectors жадные узлы DOM, которых не оказалось
  * @property {string[]} missingExports   экспорты DES, которых не оказалось
+ * @property {string[]} missingOptional  необязательные экспорты DES, которых не оказалось
  * @property {boolean|null} sameInstance импортированный стейт — тот же объект, что у DES (`null` — проверить нечем)
  */
 
@@ -380,6 +411,7 @@ export function emptyFacts() {
         ownEnabled: null,
         missingSelectors: [],
         missingExports: [],
+        missingOptional: [],
         sameInstance: null,
     };
 }
@@ -415,40 +447,10 @@ export function isLiveDesState(settingsObject, savedBlob) {
     return comparable ? false : null;
 }
 
-/** Внутренние имена всех расширений ST; при сбое — только имя по умолчанию. */
-async function getExtensionNames() {
-    try {
-        const { extensionNames } = await importSt('extensions.js');
-        if (Array.isArray(extensionNames) && extensionNames.length) return extensionNames;
-    } catch (error) {
-        log.warn('Не удалось получить список расширений ST, ищу DES по имени по умолчанию', error);
-    }
-    return [DES_INFO.defaultName];
-}
-
-/**
- * Скрипт DES на странице: ST вставляет `<script type="module" src="/scripts/extensions/<имя>/<js>">`.
- * Его адрес — основа для импорта модулей DES: тот же адрес, что DES использует сам.
- * @param {string} name
- * @param {any} manifest
- * @returns {string|null}
- */
-function findLoadedScript(name, manifest) {
-    const suffix = `/scripts/extensions/${name}/${manifest?.js || 'index.js'}`;
-    for (const script of document.querySelectorAll('script[type="module"][src]')) {
-        try {
-            if (decodeURIComponent(new URL(script.src, location.href).pathname).endsWith(suffix)) return script.src;
-        } catch {
-            // Битый src чужого скрипта — пропускаем.
-        }
-    }
-    return null;
-}
-
 /** @returns {Promise<{ name: string, manifest: any, stDisabled: boolean, scriptUrl: string|null } | null>} */
 async function locateDes() {
     const ctx = getContext();
-    for (const name of await getExtensionNames()) {
+    for (const name of await listExtensionNames(DES_INFO.defaultName)) {
         if (!String(name).startsWith('third-party/')) continue;
         let manifest = null;
         try {
@@ -462,7 +464,7 @@ async function locateDes() {
             name,
             manifest,
             stDisabled: Array.isArray(disabledList) && disabledList.includes(name),
-            scriptUrl: findLoadedScript(name, manifest),
+            scriptUrl: findExtensionScript(name, manifest),
         };
     }
     return null;
@@ -491,25 +493,29 @@ export function waitForElement(selector, timeoutMs) {
 
 /**
  * @param {string} scriptUrl адрес index.js DES
- * @returns {Promise<{ namespaces: Record<string, any>, missing: string[] }>}
+ * @returns {Promise<{ namespaces: Record<string, any>, missing: string[], missingOptional: string[] }>}
  */
 async function importDesModules(scriptUrl) {
     /** @type {Record<string, any>} */
     const namespaces = {};
     const missing = [];
+    const missingOptional = [];
     for (const [key, spec] of Object.entries(DES_MODULES)) {
+        const problems = [];
         try {
             const namespace = await import(new URL(spec.path, scriptUrl).href);
             for (const [exportName, type] of Object.entries(spec.exports)) {
                 const value = namespace[exportName];
-                if (typeof value !== type || value === null) missing.push(`${spec.path} → ${exportName}`);
+                if (typeof value !== type || value === null) problems.push(`${spec.path} → ${exportName}`);
             }
-            namespaces[key] = namespace;
+            // Необязательный модуль с пропавшими экспортами не отдаём вовсе: функция просто выключится.
+            if (!spec.optional || !problems.length) namespaces[key] = namespace;
         } catch (error) {
-            missing.push(`${spec.path} → модуль не загрузился (${error?.message ?? error})`);
+            problems.push(`${spec.path} → модуль не загрузился (${error?.message ?? error})`);
         }
+        (spec.optional ? missingOptional : missing).push(...problems);
     }
-    return { namespaces, missing };
+    return { namespaces, missing, missingOptional };
 }
 
 /**
@@ -555,8 +561,9 @@ export async function inspectDes({ timeoutMs = 30000 } = {}) {
     if (!await waitForElement(DES_SELECTORS.drawerToggle, timeoutMs)) facts.missingSelectors.push(DES_SELECTORS.drawerToggle);
     if (facts.ownEnabled !== false && !await waitForElement(DES_SELECTORS.fab, timeoutMs)) facts.missingSelectors.push(DES_SELECTORS.fab);
 
-    const { namespaces, missing } = await importDesModules(located.scriptUrl);
+    const { namespaces, missing, missingOptional } = await importDesModules(located.scriptUrl);
     facts.missingExports = missing;
+    facts.missingOptional = missingOptional;
     if (namespaces.state) {
         facts.sameInstance = isLiveDesState(namespaces.state.extensionSettings, ctx.extensionSettings?.[located.name]);
         if (typeof namespaces.state.extensionSettings?.enabled === 'boolean') facts.ownEnabled = namespaces.state.extensionSettings.enabled;
@@ -620,6 +627,24 @@ export function onDesToggle(callback) {
 }
 
 /**
+ * Имена из characterThoughts DES: `[{ name }]` или `{ characters: [{ name }] }`, строкой JSON или объектом.
+ * @param {unknown} thoughts
+ * @returns {string[]}
+ */
+function namesFromThoughts(thoughts) {
+    let data = thoughts;
+    if (typeof thoughts === 'string') {
+        try {
+            data = JSON.parse(thoughts);
+        } catch {
+            return [];
+        }
+    }
+    const list = Array.isArray(data) ? data : (Array.isArray(data?.characters) ? data.characters : []);
+    return [...new Set(list.map((entry) => (typeof entry?.name === 'string' ? entry.name.trim() : '')).filter(Boolean))];
+}
+
+/**
  * @typedef {ReturnType<typeof createApi>} DesApi
  */
 
@@ -632,7 +657,7 @@ export function onDesToggle(callback) {
  * @param {Record<string, any>} namespaces
  */
 function createApi(located, namespaces) {
-    const { state, persistence, aliases, weather, portraitBar, thoughts, sceneHeaders, parser } = namespaces;
+    const { state, persistence, aliases, weather, portraitBar, thoughts, sceneHeaders, parser, roster, bubbles, fullsheet } = namespaces;
     // `extensionSettings`, `lastGeneratedData`, `committedTrackerData` у DES — `export let`, и при загрузке
     // чата он их переприсваивает. Поэтому читаем через пространство имён каждый раз, а не кэшируем.
     const settings = () => state.extensionSettings ?? {};
@@ -728,17 +753,14 @@ function createApi(located, namespaces) {
                 } catch {
                     return [];
                 }
-                let data = thoughts;
-                if (typeof thoughts === 'string') {
-                    try {
-                        data = JSON.parse(thoughts);
-                    } catch {
-                        return [];
-                    }
-                }
-                const list = Array.isArray(data) ? data : (Array.isArray(data?.characters) ? data.characters : []);
-                return [...new Set(list.map((entry) => (typeof entry?.name === 'string' ? entry.name.trim() : '')).filter(Boolean))];
+                return namesFromThoughts(thoughts);
             },
+            /**
+             * Имена персонажей из уже разобранных данных трекера (characterThoughts — JSON-строка или объект).
+             * @param {unknown} thoughts
+             * @returns {string[]}
+             */
+            fromThoughts: (thoughts) => namesFromThoughts(thoughts),
             /**
              * Карточки DES: NPC (общие и этого чата) — к ним можно дописывать алиасы; персонажи пользователя — нельзя.
              * @returns {{ npc: string[], users: string[] }}
@@ -831,6 +853,83 @@ function createApi(located, namespaces) {
                 return { forecast: typeof forecast === 'string' ? forecast : null, time: typeof time === 'string' ? time : null };
             },
         }),
+
+        /** Персонажи DES этого чата: цвета реплик и скрытые из «Present Characters». */
+        roster: Object.freeze({
+            available: () => Boolean(roster),
+            /** Живой объект { имя: '#hex' } — тот, что DES читает при раскраске реплик. */
+            colors: () => roster.getActiveCharacterColors(),
+            /** Живой массив имён, скрытых из «Present Characters» (DES сравнивает без учёта регистра). */
+            removed: () => roster.getActiveRemovedCharacters(),
+            save() {
+                attempt('сохранение персонажей', () => roster.saveCharacterRosterChange());
+            },
+        }),
+
+        /** Пузыри чата: раскладка реплик по персонажам. */
+        bubbles: Object.freeze({
+            available: () => Boolean(bubbles),
+            mode: () => String(settings().chatBubbleMode ?? DES_KEYS.bubblesOff),
+            /** Разложить последнее сообщение заново: после того как появились новые цвета персонажей. */
+            reapplyLast() {
+                const mode = String(settings().chatBubbleMode ?? DES_KEYS.bubblesOff);
+                const chat = getContext().chat;
+                const element = Array.isArray(chat) && chat.length ? document.querySelector(`#chat .mes[mesid="${chat.length - 1}"]`) : null;
+                if (!bubbles || mode === DES_KEYS.bubblesOff || !element) return;
+                attempt('перерисовку пузырей', () => {
+                    bubbles.revertLastMessageBubbles();
+                    bubbles.applyChatBubbles(element, mode);
+                });
+            },
+            /**
+             * Сообщение, чей текст перерисовал кто-то другой (innerHTML), когда пузыри уже стояли: DES считает,
+             * что они на месте (атрибут остался), а разметки уже нет. Раскладываем заново.
+             * @returns {boolean} пришлось ли восстанавливать
+             */
+            restoreIfLost(messageElement) {
+                const mode = String(settings().chatBubbleMode ?? DES_KEYS.bubblesOff);
+                const mesText = messageElement?.querySelector('.mes_text');
+                if (!bubbles || mode === DES_KEYS.bubblesOff || !mesText) return false;
+                if (!mesText.hasAttribute(DES_SELECTORS.bubblesAppliedAttribute) || mesText.querySelector(DES_SELECTORS.bubbles)) return false;
+                attempt('перерисовку пузырей', () => {
+                    bubbles.clearBubbleState(mesText);
+                    bubbles.applyChatBubbles(messageElement, mode);
+                });
+                return true;
+            },
+        }),
+
+        /** Листы персонажей (импорт листов BunnyMo). */
+        sheets: Object.freeze({
+            available: () => Boolean(fullsheet),
+            /** Найдёт ли DES в этом тексте лист и покажет ли кнопку импорта. */
+            detects(text) {
+                try {
+                    return fullsheet.messageHasFullSheet(String(text ?? ''));
+                } catch {
+                    return false;
+                }
+            },
+            /** Пересчитать кнопку импорта у сообщения (DES сам добавит или уберёт). */
+            syncButton(messageId) {
+                attempt('обновление кнопки импорта', () => fullsheet.injectFullSheetButtonForMessage(messageId));
+            },
+            /** Живой объект { имя: лист } этого чата или `null`. */
+            store: () => getContext().chatMetadata?.[DES_KEYS.chatMetadata]?.[DES_KEYS.characterSheets] ?? null,
+            /** Переложить лист под другое имя (если под ним листа ещё нет) и сохранить чат. */
+            rename(from, to) {
+                const store = getContext().chatMetadata?.[DES_KEYS.chatMetadata]?.[DES_KEYS.characterSheets];
+                if (!store || !(from in store) || from === to) return false;
+                if (Object.keys(store).some((key) => key.toLowerCase() === String(to).toLowerCase())) return false;
+                store[to] = store[from];
+                delete store[from];
+                attempt('сохранение чата', () => persistence.saveChatData());
+                return true;
+            },
+        }),
+
+        /** Открыт ли Workshop DES (пока открыт, алиасы не дописываем: он сохранит свой снимок поверх). */
+        workshopOpen: () => Boolean(document.querySelector(DES_SELECTORS.workshopOpen)),
 
         /** Отдаёт квесты парсеру DES: он сам обновит своё зеркало квестов и сохранит настройки. */
         parseQuests(questsText) {

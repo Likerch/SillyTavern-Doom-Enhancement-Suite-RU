@@ -28,7 +28,9 @@
 >
 > Suggested fix: Unicode-aware lookarounds with the `u` flag, e.g. `(?<![\p{L}\p{N}_])NAME(?![\p{L}\p{N}_])`.
 
-*В надстройке:* снаружи не исправить. Отчасти смягчает модуль 2: при канонических именах срабатывает точное сравнение.
+*В надстройке:* модуль 2 сам связывает цвета реплик с русскими именами (то же соседство, но с юникодными границами
+и падежами) и приводит имена к каноническим — тогда срабатывает точное сравнение. Поиск автора реплики без цвета
+снаружи не исправить.
 
 ## 3. `onChatChangedTtsCleanup` wipes SillyTavern's Chat Translation
 
@@ -97,3 +99,53 @@
 > 3. Export a `removeCharacterAlias(canonical, alias)` next to `addCharacterAlias`.
 
 *В надстройке:* модуль 2 дописывает такие формы алиасами ещё до разбора ответа (режим together).
+
+---
+
+# CarrotKernel и BunnyMo
+
+Тексты issue для [CarrotKernel](https://github.com/Coneja-Chibi/CarrotKernel/issues) (коммит `145c273`) и
+[BunnyMo](https://github.com/Coneja-Chibi/BunnyMo/issues) (V3.0, коммит `7a61c9f`). Как и выше — на английском, отправлять
+или нет, решаешь ты. Код не копируется.
+
+## CK 1. Non-Latin character names collapse to an empty string
+
+> `findCharacterByName` in `index.js:1277-1347` compares names after `replace(/[^\w\s]/g, '')` and `replace(/[^a-zA-Z0-9\s]/g, '')`. Every Cyrillic (Greek, CJK…) name becomes `""`, so `""` from the searched name equals `""` from the first stored character, and the function returns whoever is first in `scannedCharacters`. With two Russian characters in a repo, `injectCharacterData` (`index.js:1404, 1455`) injects the first character's tags for both; `getTriggeredCharacters` and the card renderer get the wrong data too.
+>
+> Suggested fix: compare Unicode-aware keys, e.g. `name.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '')`, and never treat an empty variation as a match.
+
+*В надстройке:* модуль 6 пересобирает вставку тегов и подменяет поиск генератора листов через `initializeSheetGenerator`.
+Карточки в режиме «cards» снаружи не починить.
+
+## CK 2. The persistent `<BunnyMoTags>` dump is empty and goes back to the model
+
+> - `generatePersistentTagsBlock` (`index.js:3036-3066`) checks `values.size`, but tags stored by `processActivatedLorebookEntries` are arrays, so every category is skipped and the dump contains only names.
+> - `initializeBunnyMoTagsContextFiltering` (`index.js:3290`) wraps `window.Generate`, which SillyTavern 1.19 no longer calls, so the dump is sent to the model with every message.
+> - The dump makes Doom's Enhancement Suite show its "Import Character Sheet" button on ordinary replies (its detector accepts any `<BunnymoTags>` block, case-insensitively).
+>
+> Suggested fix: use `Array.from(values).length`; strip the dump in `CHAT_COMPLETION_PROMPT_READY` / `GENERATE_AFTER_COMBINE_PROMPTS`; or keep the dump out of `message.mes` (e.g. in `message.extra`).
+
+*В надстройке:* модуль 6 вырезает дамп из промпта и убирает ложную кнопку DES.
+
+## CK 3. `scan=true` on the consistency injection never reaches a scan
+
+> `injectCharacterData` runs inside `WORLD_INFO_ACTIVATED`, after the World Info scan for this generation is finished, and the injection is `ephemeral=true`, so it is removed before the next scan. Pack entries with `excludeRecursion` (BunnyRX, CoT Lenses, parts of BSM-5 and MBTI) can therefore never be activated by character tags.
+>
+> Suggested fix: keep a non-ephemeral, scan-only copy of the active characters' tags (`position=none scan=true`) for the next generation.
+
+*В надстройке:* модуль 5 делает такую вставку сам («паки по тегам персонажей сцены»).
+
+## BunnyMo 1. Auto-trigger detectors fire on BunnyMo's own text
+
+> The detectors (#46–#52) and Anti-Clanker Alpha (#55) have `excludeRecursion: false`, while always-on entries feed the recursion buffer: «panic» in the Kaomoji library (#25) fires the trauma detector, «close all `<think>` tags» in AUTO-FILTRATION: LINGUISTICS (#64) fires the attachment detector, «consistently» fires Anti-Clanker, `<MED:` in Medicine Check (#41) fires HawThorne Link — Medications.
+>
+> Suggested fix: `excludeRecursion: true` on the detectors and Anti-Clanker, `preventRecursion: true` on #25, #41 and #64.
+
+## BunnyMo 2. Non-English play
+
+> - All detector keys are English, so they never fire in a non-English roleplay; nothing tells the model which language to write sheets in, and models tend to translate the tags, which silently breaks the packs.
+> - The archetype line `<Name> <MBTI>` (#12) is shown as text when the name starts with a non-Latin letter (`<Алиса>` is not an HTML tag).
+>
+> Suggested fix: a short language rule in the sheet commands («prose in the user's language, tags and SECTION headers in English»); a hidden format like `<NPC name="…">` for the archetype line.
+
+*В надстройке:* модуль 5 — языковой замок, русские ключи детекторов, нормализатор листов, формат архетипов.

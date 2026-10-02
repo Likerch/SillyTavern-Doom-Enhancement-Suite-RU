@@ -30,6 +30,9 @@ export function evaluateGuard(facts, { verifiedVersions, templateMissing = [] })
     if (facts.version && !verifiedVersions.includes(facts.version)) {
         notes.push(`Версия ${facts.version} не проверялась, проверено на ${verifiedVersions.join(', ')}.`);
     }
+    if (facts.missingOptional?.length) {
+        notes.push(`Часть функций отключена: нет ${facts.missingOptional.join(', ')}.`);
+    }
     if (facts.sameInstance === null) {
         notes.push('У DES ещё нет сохранённых настроек — не удалось подтвердить, что его модули подключены те же.');
     }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideName, findCaseDuplicates, isCaseFormOf, normalizeRussianName } from '../src/lib/russian-names.js';
+import { decideName, findCaseDuplicates, isCaseFormOf, normalizeRussianName, wordForms } from '../src/lib/russian-names.js';
 
 const FORMS = {
     'Аня': ['Ани', 'Ане', 'Аню', 'Аней', 'Анею'],
@@ -71,9 +71,9 @@ function context({ npc = [], users = [], aliases = [], excluded = () => null } =
 
 test('a case form of an NPC card becomes its alias', () => {
     const ctx = context({ npc: ['Аня', 'Мира'] });
-    assert.deepEqual(decideName('Аней', ctx), { action: 'alias', canonical: 'Аня' });
-    assert.deepEqual(decideName('  Мирой ', ctx), { action: 'alias', canonical: 'Мира' });
-    assert.deepEqual(decideName('аня', ctx), { action: 'alias', canonical: 'Аня' });
+    assert.deepEqual(decideName('Аней', ctx), { action: 'alias', canonical: 'Аня', via: 'падеж' });
+    assert.deepEqual(decideName('  Мирой ', ctx), { action: 'alias', canonical: 'Мира', via: 'падеж' });
+    assert.deepEqual(decideName('аня', ctx), { action: 'alias', canonical: 'Аня', via: 'падеж' });
 });
 
 test('cards, aliases, persons and ambiguity are left to DES', () => {
@@ -108,5 +108,81 @@ test('real names from the server sample are not merged by mistake', () => {
     const ctx = context({ npc: ['Акари', 'Мисс Танака', 'Студентки в зале'] });
     assert.equal(decideName('Акари Саотомэ', ctx).action, 'skip');
     assert.equal(decideName('Мисс Танака (голос из зала)', ctx).action, 'skip');
-    assert.deepEqual(decideName('Мисс Танаке', ctx), { action: 'alias', canonical: 'Мисс Танака' });
+    assert.deepEqual(decideName('Мисс Танаке', ctx), { action: 'alias', canonical: 'Мисс Танака', via: 'падеж' });
+});
+
+test('case forms of an alias lead to its card', () => {
+    const ctx = context({ npc: ['Дарган фон Вартенбург'] });
+    ctx.aliasesOf = new Map([['Дарган фон Вартенбург', ['Дарган']]]);
+    assert.deepEqual(decideName('Даргану', ctx), { action: 'alias', canonical: 'Дарган фон Вартенбург', via: 'падеж алиаса' });
+    assert.deepEqual(decideName('Дарганом', ctx), { action: 'alias', canonical: 'Дарган фон Вартенбург', via: 'падеж алиаса' });
+});
+
+test('titles and Japanese honorifics are stripped, kinship words are not', () => {
+    const ctx = context({ npc: ['Дарган', 'Аня', 'Akari'] });
+    assert.equal(decideName('Капитан Дарган', ctx).canonical, 'Дарган');
+    assert.equal(decideName('Фельдмаршал Дарган', ctx).via, 'звание или обращение');
+    assert.equal(decideName('Аня-сан', ctx).canonical, 'Аня');
+    assert.equal(decideName('Akari-chan', ctx).canonical, 'Akari');
+    assert.equal(decideName('сестра Ани', ctx).action, 'skip');
+    assert.equal(decideName('мать Ани', ctx).action, 'skip');
+});
+
+test('a first name or a surname alone leads to the full card, unless two cards share it', () => {
+    const ctx = context({ npc: ['Аня Петрова', 'Дарган фон Вартенбург'] });
+    assert.deepEqual(decideName('Аня', ctx), { action: 'alias', canonical: 'Аня Петрова', via: 'часть имени' });
+    assert.equal(decideName('Ани', ctx).canonical, 'Аня Петрова');
+    assert.equal(decideName('Петровой', ctx).canonical, 'Аня Петрова');
+    assert.equal(decideName('Вартенбургу', ctx).canonical, 'Дарган фон Вартенбург');
+    assert.equal(decideName('фон', ctx).action, 'skip');
+    const twins = decideName('Аня', context({ npc: ['Аня Петрова', 'Аня Смирнова'] }));
+    assert.equal(twins.reason, 'подходит нескольким карточкам');
+    // Есть карточка ровно «Аня» — форма идёт к ней, а не к «Ане Петровой».
+    assert.equal(decideName('Ане', context({ npc: ['Аня', 'Аня Петрова'] })).canonical, 'Аня');
+});
+
+test('diminutives lead to the full name and back, ambiguity is left to DES', () => {
+    assert.deepEqual(decideName('Саша', context({ npc: ['Александр'] })), { action: 'alias', canonical: 'Александр', via: 'уменьшительное' });
+    assert.equal(decideName('Саше', context({ npc: ['Александр'] })).canonical, 'Александр');
+    assert.equal(decideName('Аня', context({ npc: ['Анна Петрова'] })).canonical, 'Анна Петрова');
+    assert.equal(decideName('Александру', context({ npc: ['Саша'] })).canonical, 'Саша');
+    assert.equal(decideName('Шура', context({ npc: ['Саша'] })).canonical, 'Саша');
+    assert.equal(decideName('Саша', context({ npc: ['Александр', 'Александра'] })).reason, 'подходит нескольким карточкам');
+    assert.equal(decideName('Маша', context({ npc: ['Александр'] })).action, 'skip');
+});
+
+test('transliteration links Cyrillic and Latin spellings', () => {
+    assert.deepEqual(decideName('Акари', context({ npc: ['Akari'] })), { action: 'alias', canonical: 'Akari', via: 'транслит' });
+    assert.equal(decideName('Anya', context({ npc: ['Аня'] })).canonical, 'Аня');
+    assert.equal(decideName('Ania', context({ npc: ['Аня'] })).canonical, 'Аня');
+    assert.equal(decideName('Сётаро', context({ npc: ['Shotaro'] })).canonical, 'Shotaro');
+    assert.equal(decideName('Тиё', context({ npc: ['Chiyo'] })).canonical, 'Chiyo');
+    assert.equal(decideName('Акари', context({ npc: ['Akari Saotome'] })).canonical, 'Akari Saotome');
+    assert.equal(decideName('Ana', context({ npc: ['Аня'] })).action, 'skip');
+    assert.equal(decideName('Mira', context({ npc: ['Аня'] })).action, 'skip');
+});
+
+test('forms of a player character are hidden, never aliased', () => {
+    const ctx = context({ npc: ['Аня'], users: ['Лиза'] });
+    ctx.userCards = ['Лиза'];
+    assert.deepEqual(decideName('Лизы', ctx), { action: 'hide', persona: 'Лиза', via: 'падеж' });
+    assert.equal(decideName('Лизонька', ctx).action, 'hide');
+    assert.equal(decideName('лиза', ctx).reason, 'это персонаж пользователя');
+    assert.equal(decideName('Лиза', ctx).reason, 'это персонаж пользователя');
+    assert.equal(decideName('Ани', ctx).action, 'alias');
+});
+
+test('steps can be switched off', () => {
+    const ctx = context({ npc: ['Аня Петрова'] });
+    ctx.steps = { parts: false, diminutives: false, translit: false, address: false };
+    assert.equal(decideName('Аня', ctx).action, 'skip');
+    assert.equal(decideName('Ани Петровой', ctx).action, 'alias');
+});
+
+test('word forms with the genitive are available for text search', () => {
+    assert.ok(wordForms('иван', { genitive: true }).includes('ивана'));
+    assert.ok(!wordForms('иван').includes('ивана'));
+    assert.ok(wordForms('павел', { genitive: true }).includes('павла'));
+    assert.ok(wordForms('василий', { genitive: true }).includes('василия'));
+    assert.deepEqual(wordForms('акари'), ['акари']);
 });

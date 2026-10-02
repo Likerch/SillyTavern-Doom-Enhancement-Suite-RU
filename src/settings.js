@@ -11,11 +11,17 @@ export const DEFAULT_SETTINGS = {
     debug: false,
     modules: {
         localization: { enabled: true, toasts: true, collect: true, userDictionary: {} },
-        // exceptions: имена, которые не склеивать; journal: склейки { variant, canonical, at }; unmerged: разъединённые пары
-        names: { enabled: true, aliasForms: true, nominativePrompt: true, exceptions: [], journal: [], unmerged: [] },
+        // exceptions: имена, которые не склеивать; journal: склейки { variant, canonical, kind, via, at }; unmerged: разъединённые пары;
+        // caseAliasesAdded: алиасы-написания (нижний регистр, без ё), которые модуль дописал сам
+        names: {
+            enabled: true, aliasForms: true, nominativePrompt: true, nameSteps: true, caseAliases: true, personaForms: true,
+            speakerColors: true, sheets: true, exceptions: [], journal: [], unmerged: [], caseAliasesAdded: [],
+        },
         // userWeatherWords: свой словарь погоды { тип: [слова] }; null — встроенный
         serviceValues: { enabled: true, weatherWords: true, weatherPrompt: true, timePrompt: true, userWeatherWords: null },
         fixes: { enabled: true, fieldKeys: true, offScene: true, noQuest: true, keepTranslations: true },
+        bunnymo: { enabled: true, languageLock: true, detectors: true, antiClanker: true, archetypes: true, archiveKeys: true, normalizer: true, packTags: true },
+        carrotKernel: { enabled: true, cyrillicNames: true, dumpFilter: true, desButtons: true, translateUi: true, toasts: true, collect: true, userDictionary: {} },
     },
 };
 

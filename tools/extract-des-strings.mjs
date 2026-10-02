@@ -11,102 +11,18 @@
 // склеивает из нескольких литералов, тоже попадут в отчёт — его надо просмотреть глазами.
 //
 // Код DES в репозиторий не попадает: инструмент читает vendor/des (он в .gitignore) и печатает только строки.
+// Общие части с tools/extract-ck-strings.mjs — в tools/lib/source-strings.mjs.
 import fs from 'node:fs';
 import path from 'node:path';
 import { createDictionary, looksTranslatable, normalizeText } from '../src/lib/dictionary.js';
+import { dictionaryKeys, findStale, joinParts, listJs, printJson, readLiteral, readOptions, sourceVariants } from './lib/source-strings.mjs';
 
-const args = process.argv.slice(2);
-/** Значение опции вида `--имя путь`. */
-function option(name) {
-    const index = args.indexOf(name);
-    return index >= 0 ? args[index + 1] : null;
-}
-const dictionaryPath = option('--missing');
-const stalePath = option('--stale');
-const optionValues = new Set([dictionaryPath, stalePath]);
-const desRoot = path.resolve(args.find((arg) => !arg.startsWith('--') && !optionValues.has(arg)) ?? 'vendor/des');
+const { root: desRoot, missing: dictionaryPath, stale: stalePath } = readOptions(process.argv.slice(2), 'vendor/des');
 
 /** Модули DES, которые нигде не импортируются (docs/des-recon.md §1.5). */
 const DEAD = new Set(['src/systems/ui/mobile.js', 'src/systems/ui/desktop.js', 'src/systems/ui/snowflakes.js',
     'src/systems/rendering/musicPlayer.js', 'src/systems/features/musicPlayer.js', 'src/core/perf.js',
     'src/systems/generation/inventoryParser.js', 'src/utils/migration.js']);
-
-function listJs(dir) {
-    const result = [];
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) result.push(...listJs(full));
-        else if (entry.name.endsWith('.js')) result.push(full);
-    }
-    return result;
-}
-
-/**
- * Читает строковый литерал, начинающийся с кавычки в позиции `start`.
- * @returns {{ end: number, parts: (string|{ expr: string })[] } | null}
- */
-function readLiteral(code, start) {
-    const quote = code[start];
-    const parts = [];
-    let text = '';
-    let i = start + 1;
-    while (i < code.length) {
-        const char = code[i];
-        if (char === '\\') {
-            const next = code[i + 1];
-            text += next === 'n' ? '\n' : next === 't' ? '\t' : next;
-            i += 2;
-            continue;
-        }
-        if (char === quote) {
-            if (text) parts.push(text);
-            return { end: i + 1, parts };
-        }
-        if (quote === '`' && char === '$' && code[i + 1] === '{') {
-            if (text) parts.push(text);
-            text = '';
-            let depth = 1;
-            let j = i + 2;
-            while (j < code.length && depth > 0) {
-                if (code[j] === '{') depth += 1;
-                else if (code[j] === '}') depth -= 1;
-                else if (code[j] === '`' || code[j] === '\'' || code[j] === '"') {
-                    const inner = readLiteral(code, j);
-                    if (!inner) return null;
-                    j = inner.end;
-                    continue;
-                }
-                j += 1;
-            }
-            parts.push({ expr: code.slice(i + 2, j - 1) });
-            i = j;
-            continue;
-        }
-        if (quote !== '`' && char === '\n') return null;
-        text += char;
-        i += 1;
-    }
-    return null;
-}
-
-/** Имя плейсхолдера по выражению: последний идентификатор («escapeHtml(char.name)» → name). */
-function placeholderName(expr, used) {
-    const identifiers = expr.match(/[A-Za-z_]\w*/g) ?? [];
-    const candidates = identifiers.filter((word) => !['escapeHtml', 'escapeAttr', 'String', 'Number', 'length', 'toFixed', 'trim', 'join', 'map'].includes(word));
-    let name = candidates.at(-1) ?? 'value';
-    if (/^\d|\?|===|!==/.test(expr)) name = 'value';
-    let unique = name;
-    let n = 2;
-    while (used.has(unique)) unique = `${name}${n++}`;
-    used.add(unique);
-    return unique;
-}
-
-/** Склеивает части литерала в строку с плейсхолдерами. */
-function joinParts(parts) {
-    const used = new Set();
-    return parts.map((part) => (typeof part === 'string' ? part : `{${placeholderName(part.expr, used)}}`)).join('');
-}
 
 const TEXT_IN_HTML = />([^<>]+)</g;
 const ATTRIBUTE_IN_HTML = /\b(?:title|placeholder|aria-label)="([^"]*)"/g;
@@ -123,45 +39,17 @@ function add(text, where) {
 
 const CALL_CONTEXT = /(?:toastr\.(?:success|info|warning|error)\(\s*(?:[^,()]+,\s*)?|\.text\(\s*|textContent\s*=\s*|\.title\s*=\s*|placeholder\s*=\s*|\.attr\(\s*['"](?:title|placeholder|aria-label)['"]\s*,\s*|setAttribute\(\s*['"](?:title|placeholder|aria-label)['"]\s*,\s*|\blabel:\s*|\bt\(\s*'[^']*'\s*,\s*)$/;
 
-const ENTITIES = { hellip: '…', mdash: '—', ndash: '–', amp: '&', nbsp: ' ', quot: '"', apos: '\'', lt: '<', gt: '>',
-    rarr: '→', larr: '←', uarr: '↑', darr: '↓', times: '×', middot: '·', bull: '•', laquo: '«', raquo: '»', copy: '©', deg: '°' };
-
-/** @param {string} text */
-function decodeEntities(text) {
-    return text
-        .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-        .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
-        .replace(/&([a-z]+);/gi, (entity, name) => ENTITIES[name.toLowerCase()] ?? entity);
-}
-
-/**
- * Код и разметка DES одной строкой: без отступов, JS-экранирования и HTML-сущностей. Три варианта —
- * с `${...}` как есть, без них и с «s» на их месте, чтобы находились и `portrait${s}`, и `card${n === 1 ? '' : 's'}`.
- */
-function desSourceVariants() {
+/** Код и разметка DES, в которых ищутся куски ключей для --stale. */
+function desSources() {
     const files = listJs(path.join(desRoot, 'src'))
         .concat(['index.js', 'template.html', 'settings.html', 'whatsnew.json'].map((name) => path.join(desRoot, name)))
         .filter((file) => fs.existsSync(file) && !DEAD.has(path.relative(desRoot, file).replaceAll('\\', '/')));
-    const decoded = decodeEntities(files.map((file) => fs.readFileSync(file, 'utf8')).join('\n')
-        .replace(/\\u\{?([0-9a-f]{4,5})\}?/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-        .replace(/\\(['"`])/g, '$1'));
-    const flat = (text) => text.replace(/\s+/g, ' ');
-    return [flat(decoded), flat(decoded.replace(/\$\{[^{}]*\}/g, '')), flat(decoded.replace(/\$\{[^{}]*\}/g, 's'))];
+    return sourceVariants(files.map((file) => fs.readFileSync(file, 'utf8')));
 }
 
 if (stalePath) {
-    const sources = desSourceVariants();
-    const stale = {};
-    for (const key of Object.keys(JSON.parse(fs.readFileSync(stalePath, 'utf8')))) {
-        if (key.startsWith('__')) continue;
-        const missing = key.split(/\{#?\w+(?:\|[^{}]*)?\}|<[^>]+>/)
-            .map((piece) => decodeEntities(piece).replace(/\s+/g, ' ').trim())
-            .filter((piece) => piece.length >= 3 && /\p{L}/u.test(piece))
-            .filter((piece) => !sources.some((source) => source.includes(piece)));
-        if (missing.length) stale[key] = missing.map((piece) => JSON.stringify(piece)).join(' | ');
-    }
-    const output = { __desru: `Ключи словаря, куски которых не нашлись в DES (${Object.keys(stale).length}). Значение — ненайденные куски.`, ...stale };
-    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+    const stale = findStale(dictionaryKeys(stalePath), desSources());
+    printJson({ __desru: `Ключи словаря, куски которых не нашлись в DES (${Object.keys(stale).length}). Значение — ненайденные куски.`, ...stale });
     process.exit(0);
 }
 
@@ -199,4 +87,4 @@ if (dictionaryPath) {
 }
 const output = { __desru: `Строки из JS-кода DES (${entries.length}). Ключ — строка, значение — где встречается.` };
 for (const [text, places] of entries) output[text] = [...places].slice(0, 3).join(', ');
-process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+printJson(output);

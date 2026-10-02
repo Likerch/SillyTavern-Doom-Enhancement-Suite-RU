@@ -12,6 +12,8 @@ import localization from './modules/localization.js';
 import names from './modules/names.js';
 import serviceValues from './modules/service-values.js';
 import fixes from './modules/fixes.js';
+import bunnymo from './modules/bunnymo.js';
+import carrotKernel from './modules/carrot-kernel.js';
 
 /**
  * @typedef {object} AddonEnv то, что получает модуль при включении
@@ -35,12 +37,14 @@ import fixes from './modules/fixes.js';
  * @property {() => void|Promise<void>} disable
  * @property {(key: string, enabled: boolean) => void} [onOptionChange] переключатель внутри работающего модуля
  * @property {() => { level: 'info'|'warn', text: string }[]} [notes] замечания для панели, пока модуль работает
+ * @property {() => { text: string, tone: 'on'|'off'|'wait'|'blocked' }|null} [status] своё состояние вместо «работает»
+ *           (например, модуль включён, но его расширения нет)
  * @property {string} [section] свой раздел панели: `[data-desru-section]` в settings.html
  * @property {(section: HTMLElement) => void} [mountSection] рисует этот раздел (один раз, при монтировании панели)
  */
 
 /** @type {AddonModule[]} Порядок — как в панели. */
-const MODULES = [localization, names, serviceValues, fixes];
+const MODULES = [localization, names, serviceValues, fixes, bunnymo, carrotKernel];
 
 const DES_INIT_TIMEOUT_MS = 30000;
 const RECHECK_TIMEOUT_MS = 5000;
@@ -272,7 +276,15 @@ function onDebugToggle(enabled) {
 function describeModule(module) {
     const settings = getSettings();
     if (settings.modules[module.id]?.enabled === false) return { text: 'выключен', tone: 'off' };
-    if (state.running.has(module.id)) return { text: module.stub ? 'включён (пока заглушка)' : 'работает', tone: 'on' };
+    if (state.running.has(module.id)) {
+        let custom = null;
+        try {
+            custom = module.status?.() ?? null;
+        } catch (error) {
+            log.warn(`Модуль ${module.number}: не удалось узнать состояние`, error);
+        }
+        return custom ?? { text: module.stub ? 'включён (пока заглушка)' : 'работает', tone: 'on' };
+    }
     if (state.checking && !state.verdict) return { text: 'ждёт проверки DES', tone: 'wait' };
     if (!state.verdict?.ui) return { text: 'не работает: DES недоступен', tone: 'blocked' };
     if (module.needs.data && !state.verdict.data) return { text: 'остановлен гардом', tone: 'blocked' };
