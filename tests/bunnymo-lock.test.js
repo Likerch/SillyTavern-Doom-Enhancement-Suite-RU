@@ -126,6 +126,42 @@ test('a stopped generation and a chat change clear the lock', async () => {
     assert.equal(prompts.desru_bunnymo_language.value, '');
 });
 
+test('while Maestro owns the scan-only tag slot the module leaves it empty, and refills it when given back', async () => {
+    const { setMaestroOwned } = await import('../src/maestro-api.js');
+    try {
+        assert.equal((await generate('normal', { activated: [core[0], archive] })).sceneTags, true);
+        setMaestroOwned(['bunnymo.scanTags']);
+        assert.equal(prompts.desru_bunnymo_tags.value, '', 'cleared at once, not on the next generation');
+        assert.deepEqual(await generate('normal', { activated: [core[0], archive] }), { lock: true, sceneTags: false });
+        assert.deepEqual(ctx.chatMetadata.desru_bunnymo.tags, ['<JEALOUSY:POSSESSIVE>', '<TRAIT:CLINGY>'], 'tags are still recorded');
+        assert.ok(bunnymo.notes().some((note) => note.text.includes('Maestro')));
+        setMaestroOwned([]);
+        assert.ok(prompts.desru_bunnymo_tags.value.includes('<JEALOUSY:POSSESSIVE>'));
+    } finally {
+        setMaestroOwned([]);
+    }
+});
+
+test('while Maestro owns the structural patches, entries keep their recursion flags but get Russian keys', async () => {
+    const { setMaestroOwned } = await import('../src/maestro-api.js');
+    const detector = { uid: 46, world: 'BunnyMo', comment: 'AUTO-TRIGGER: Jealousy Detection', key: ['jealous'], excludeRecursion: false, content: 'x' };
+    const kaomoji = { uid: 25, world: 'BunnyMo', comment: 'Master - Kaomoji Library', key: [], preventRecursion: false, content: 'panic' };
+    const scan = () => eventSource.emit(eventTypes.WORLDINFO_ENTRIES_LOADED, { globalLore: [...core, detector, kaomoji], characterLore: [], chatLore: [], personaLore: [] });
+    try {
+        setMaestroOwned(['bunnymo.structuralPatches']);
+        await scan();
+        assert.equal(detector.excludeRecursion, false);
+        assert.equal(kaomoji.preventRecursion, false);
+        assert.ok(detector.key.length > 1, 'Russian detector key');
+        setMaestroOwned([]);
+        await scan();
+        assert.equal(detector.excludeRecursion, true);
+        assert.equal(kaomoji.preventRecursion, true);
+    } finally {
+        setMaestroOwned([]);
+    }
+});
+
 test('the option and the module switch the lock off', async () => {
     ctx.extensionSettings.desru.modules.bunnymo.languageLock = false;
     assert.equal((await generate('normal', { activated: [core[0]] })).lock, false);

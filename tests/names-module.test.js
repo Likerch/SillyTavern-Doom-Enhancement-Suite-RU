@@ -342,3 +342,33 @@ function unmergeFromPanel(entry) {
     assert.ok(button, `нет кнопки «Разъединить» для «${entry.variant}»`);
     button.onClick();
 }
+
+test('Maestro hears about alias and hidden-name changes, not about replies that change nothing', async () => {
+    const { createApi } = await import('../src/maestro-api.js');
+    const api = createApi({ des: () => des });
+    let calls = 0;
+    const off = api.onNamesChanged(() => {
+        calls += 1;
+    });
+    try {
+        des.state.users = { 'Лиза': {} };
+        des.chat().known = { 'Аня': {} };
+        await enable();
+        assert.equal(calls, 0);
+        reply(['Ани']);
+        assert.equal(calls, 1, 'alias added');
+        assert.deepEqual(api.aliases(), { 'Аня': ['Ани'] });
+        reply(['Ани']);
+        assert.equal(calls, 1, 'already an alias: nothing changed');
+        reply(['Лизы']);
+        assert.equal(calls, 2, 'persona form hidden');
+        des.state.mode = 'separate';
+        des.chat().known['Борис'] = {};
+        await openChat('A');
+        // Смена чата: алиасы-написания (режим separate) и заготовка DES для скрытой «Лизы» убрана — два изменения.
+        assert.equal(calls, 4);
+        assert.deepEqual(api.aliases()['Борис'], ['борис']);
+    } finally {
+        off();
+    }
+});

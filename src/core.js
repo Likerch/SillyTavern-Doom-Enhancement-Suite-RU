@@ -8,6 +8,7 @@ import { getSettings, saveSettings } from './settings.js';
 import { DES_INFO, checkTemplate, inspectDes, onDesToggle, onTemplateInserted } from './des-adapter.js';
 import { evaluateGuard } from './guard.js';
 import { mountPanel } from './panel.js';
+import { installApi } from './maestro-api.js';
 import localization from './modules/localization.js';
 import names from './modules/names.js';
 import serviceValues from './modules/service-values.js';
@@ -79,6 +80,12 @@ let recheckTimer = 0;
 let recheckRun = 0;
 
 export async function start() {
+    // API для Maestro — сразу: склонения работают и без DES, а алиасы появятся, когда гард разрешит работу с данными.
+    try {
+        installApi({ des: () => (state.verdict?.data ? state.des : null) });
+    } catch (error) {
+        log.error('API для Maestro не установился', error);
+    }
     // Скрипт надстройки грузится раньше, чем ST откроет последний чат: ранние шаги успевают до DES.
     const preloading = preloadModules();
     await new Promise((resolve) => onAppReady(resolve));

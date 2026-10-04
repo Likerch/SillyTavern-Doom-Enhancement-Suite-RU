@@ -25,6 +25,8 @@ const KNOWN_NAMES = new Set([...Object.keys(DIMINUTIVES), ...FULL_NAMES_BY_DIMIN
  * @property {boolean} antiClanker «анти-клэнкер»: русские ключи, текст Alpha по-русски
  * @property {boolean} archetypes архетипы: <NPC name="…"> вместо невидимого для кириллицы <Имя>
  * @property {boolean} archiveKeys кириллические ключи архивов персонажей → все падежные формы
+ * @property {boolean} [structural] флаги рекурсии (excludeRecursion у детекторов и «анти-клэнкера», preventRecursion
+ *           у записей из noRecursionOut); `false` — их ставит Maestro, русские ключи и текст остаются. По умолчанию да
  *
  * @typedef {object} PatchStats
  * @property {number} detectors
@@ -108,6 +110,7 @@ export function patchEntries(lists, options, signatures, helpers) {
     const stats = { detectors: 0, antiClanker: 0, noRecursion: 0, archetypes: 0, archiveKeys: 0 };
     const detectorKeys = new Map(Object.entries(DETECTOR_STEMS_RU).map(([id, stems]) => [id, stemsKey(stems)]));
     const roboticKey = stemsKey(ROBOTIC_STEMS_RU);
+    const structural = options.structural !== false;
     for (const list of lists) {
         if (!Array.isArray(list)) continue;
         for (const entry of list) {
@@ -116,7 +119,7 @@ export function patchEntries(lists, options, signatures, helpers) {
             const detector = signatures.detectors.find((item) => item.comment.test(comment));
             if (detector && options.detectors) {
                 // Только текст чата: иначе «panic» из библиотеки каомодзи включает детектор паники.
-                entry.excludeRecursion = true;
+                if (structural) entry.excludeRecursion = true;
                 // И не теги сцены: на вставку для сканирования запрет рекурсии не действует.
                 keysOutsideTags(entry);
                 const key = detectorKeys.get(detector.id);
@@ -125,7 +128,7 @@ export function patchEntries(lists, options, signatures, helpers) {
                 continue;
             }
             if (signatures.antiClanker.test(comment) && options.antiClanker) {
-                entry.excludeRecursion = true;
+                if (structural) entry.excludeRecursion = true;
                 keysOutsideTags(entry);
                 addKey(entry, roboticKey);
                 if (signatures.antiClankerAlpha.test(comment) && typeof entry.content === 'string') entry.content = ANTI_CLANKER_RU;
@@ -133,8 +136,10 @@ export function patchEntries(lists, options, signatures, helpers) {
                 continue;
             }
             if (options.detectors && signatures.noRecursionOut.some((pattern) => pattern.test(comment))) {
-                entry.preventRecursion = true;
-                stats.noRecursion += 1;
+                if (structural) {
+                    entry.preventRecursion = true;
+                    stats.noRecursion += 1;
+                }
                 continue;
             }
             if (options.archetypes && signatures.archetypes.test(comment) && typeof entry.content === 'string') {

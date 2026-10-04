@@ -13,6 +13,9 @@
  *    всеми падежами имени.
  * 3. Нормализатор ответа (MESSAGE_RECEIVED, раньше DES и CK): переведённые служебные токены — обратно.
  * 4. Теги персонажей сцены — во вставку «только для сканирования»: паки срабатывают и с запретом рекурсии.
+ *
+ * Флаги рекурсии записей (часть п. 2) и вставку тегов сцены (п. 4) может взять на себя Maestro (src/maestro-api.js):
+ * пока они у него, модуль их пропускает.
  */
 import { PROMPT_POSITION, PROMPT_ROLE, getContext, outgoingPromptRegexes, rerenderMessage } from '../st.js';
 import { log } from '../log.js';
@@ -24,6 +27,7 @@ import { normalizeMachineLayer } from '../lib/bunnymo-normalize.js';
 import { archiveFormsOf, patchEntries } from '../lib/bunnymo-patch.js';
 import { LANGUAGE_LOCK_RU } from '../lib/bunnymo-ru.js';
 import { wordForms } from '../lib/russian-names.js';
+import { isMaestroOwned, onOwnershipChange } from '../maestro-api.js';
 
 /** Наши слоты extension-промптов. */
 const SLOTS = Object.freeze({ lock: 'desru_bunnymo_language', tags: 'desru_bunnymo_tags' });
@@ -111,6 +115,11 @@ let worldInfoHandler = null;
 /** @type {string[]} */
 let unresolved = [];
 let normalizedMessages = 0;
+/** @type {(() => void)|null} */
+let stopOwnershipWatch = null;
+
+/** Функции модуля, которые может взять на себя Maestro. */
+const MAESTRO = Object.freeze({ structural: 'bunnymo.structuralPatches', scanTags: 'bunnymo.scanTags' });
 
 function moduleSettings() {
     return getSettings().modules.bunnymo;
@@ -169,6 +178,7 @@ function onEntriesLoaded(payload) {
         antiClanker: option('antiClanker'),
         archetypes: option('archetypes'),
         archiveKeys: option('archiveKeys'),
+        structural: !isMaestroOwned(MAESTRO.structural),
     }, BUNNYMO_ENTRIES, {
         isArchive: (entry) => archives.has(entry),
         // Без форм, которые сами — имена: «Александра» не включает архив Александра, «Петрова» — архив Петрова.
@@ -236,6 +246,9 @@ function setLanguageLock(value) {
     setExtensionPrompt(SLOTS.lock, value, PROMPT_POSITION.IN_CHAT, 0, false, PROMPT_ROLE.SYSTEM, lockWanted);
 }
 
+/** Вставку тегов сцены пишет модуль: опция включена и вставку не взял на себя Maestro. */
+const sceneTagsWanted = () => option('packTags') && !isMaestroOwned(MAESTRO.scanTags);
+
 /**
  * Теги персонажей прошлой генерации — во вставку, которую ST только сканирует, но не отправляет. Фоновым
  * генерациям и пробным сборкам — пусто: фильтр вставок для сканирования ST проверяет в момент сканирования.
@@ -243,9 +256,9 @@ function setLanguageLock(value) {
 function setSceneTags() {
     const { setExtensionPrompt } = getContext();
     const entry = sceneTags();
-    const value = option('packTags') && entry?.tags.length ? entry.tags.join(' ') : '';
+    const value = sceneTagsWanted() && entry?.tags.length ? entry.tags.join(' ') : '';
     setExtensionPrompt(SLOTS.tags, value, PROMPT_POSITION.NONE, 0, true, PROMPT_ROLE.SYSTEM,
-        () => Boolean(env) && option('packTags') && !scanIsQuiet());
+        () => Boolean(env) && sceneTagsWanted() && !scanIsQuiet());
 }
 
 /**
@@ -424,6 +437,15 @@ export default {
         });
         setLanguageLock('');
         setSceneTags();
+        // Maestro взял вставку тегов сцены или вернул её — сразу, не дожидаясь следующей генерации.
+        stopOwnershipWatch?.();
+        stopOwnershipWatch = onOwnershipChange(() => {
+            if (!env) return;
+            setSceneTags();
+            notifyChange();
+            // Замечания модуля в списке модулей рисует ядро.
+            env.refresh?.();
+        });
         notifyChange();
         log.info('Модуль 5 (BunnyMo) включён.');
     },
@@ -431,6 +453,8 @@ export default {
         const { eventSource } = getContext();
         for (const [event, handler] of subscriptions) eventSource.removeListener(event, handler);
         subscriptions = [];
+        stopOwnershipWatch?.();
+        stopOwnershipWatch = null;
         worldInfoHandler = null;
         generations = [];
         clearSlots();
@@ -450,6 +474,11 @@ export default {
         if (unresolved.length) {
             notes.push({ level: 'warn', text: `Паки не сработают по тегам из ответов (не по-английски или такого значения нет в подключённых паках): ${unresolved.slice(0, 5).join(' ')}${unresolved.length > 5 ? '…' : ''}` });
         }
+        const maestro = [
+            isMaestroOwned(MAESTRO.structural) && 'флаги рекурсии записей BunnyMo',
+            isMaestroOwned(MAESTRO.scanTags) && 'вставку тегов сцены для паков',
+        ].filter(Boolean);
+        if (maestro.length) notes.push({ level: 'info', text: `Maestro взял на себя ${maestro.join(' и ')} — модуль их пропускает. Русские ключи, текст записей и падежи архивов остаются за модулем.` });
         return notes;
     },
 };

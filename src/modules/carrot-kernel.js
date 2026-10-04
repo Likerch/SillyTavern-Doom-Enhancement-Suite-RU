@@ -13,6 +13,8 @@
  * 3. Интерфейс CK — по-русски, тем же движком, что и DES (словарь locales/ru.carrotkernel.json).
  *
  * Файлы CK не меняются; модуль ждёт, пока CK закончит запуск, и проверяет нужные экспорты.
+ *
+ * Пересборку вставки тегов (п. 1) может взять на себя Maestro (src/maestro-api.js): тогда модуль её не трогает.
  */
 import { getContext, notify } from '../st.js';
 import { log } from '../log.js';
@@ -22,6 +24,7 @@ import { DES_SELECTORS } from '../des-adapter.js';
 import { carrotDumpBodies, findCharacter, ragTriggerForms, stripCarrotDumps, stripCarrotDumpsFromPrompt } from '../lib/carrot-data.js';
 import { renderTemplate } from '../lib/dictionary.js';
 import { wordForms } from '../lib/russian-names.js';
+import { isMaestroOwned, onOwnershipChange } from '../maestro-api.js';
 import { createTranslator, downloadJson } from '../translator.js';
 import { menuButton } from '../ui.js';
 
@@ -33,6 +36,8 @@ const MULTILINGUAL_HINT = 'bge-m3, multilingual-e5, embed-multilingual-v3.0, tex
 const MULTILINGUAL_MODEL = /multilingual|bge-m3|(?:^|[^a-z0-9])e5(?:$|[^a-z0-9])|text-embedding-3|gemini-embedding|embed-v4/i;
 /** Источник эмбеддингов «встроенные ST»: модель задаётся не в CK, а в config.yaml сервера. */
 const LOCAL_EMBEDDINGS = 'transformers';
+/** Пересборка вставки тегов CK — функция, которую может взять на себя Maestro. */
+const MAESTRO_REBUILD = 'ck.consistencyRebuild';
 const NON_ASCII = /[^\x00-\x7F]/;
 
 const OPTIONS = [
@@ -88,6 +93,8 @@ const counters = { consistency: 0, dumps: 0, buttons: 0, restored: 0, ragForms: 
 /** @type {Set<() => void>} */
 const changeListeners = new Set();
 let notifyTimer = 0;
+/** @type {(() => void)|null} */
+let stopOwnershipWatch = null;
 
 function moduleSettings() {
     return getSettings().modules.carrotKernel;
@@ -168,7 +175,7 @@ function installFinder() {
  * пересобрать с правильным. Вставку по шаблону CK собирает макросами, а они уже ищут нашим поиском.
  */
 function fixConsistency() {
-    if (!ck || !option('cyrillicNames') || !ck.enabled() || !ck.sendsToAi()) return;
+    if (!ck || !option('cyrillicNames') || isMaestroOwned(MAESTRO_REBUILD) || !ck.enabled() || !ck.sendsToAi()) return;
     if (finderInstalled && ck.usesInjectionTemplate()) return;
     const names = ck.lastInjected();
     if (!names.some((name) => NON_ASCII.test(name))) return;
@@ -581,6 +588,8 @@ export default {
         ck = null;
         inspectFailed = false;
         const run = ++enableRun;
+        stopOwnershipWatch?.();
+        stopOwnershipWatch = onOwnershipChange(notifyChange);
         // CK заканчивает запуск не сразу, проверка ждёт его панель до 30 секунд — в фоне, чтобы не держать
         // очередь модулей надстройки. Пока ждём, статус модуля — «ищет CarrotKernel…».
         inspectCk({ timeoutMs: CK_WAIT_MS })
@@ -597,6 +606,8 @@ export default {
     },
     disable() {
         enableRun += 1;
+        stopOwnershipWatch?.();
+        stopOwnershipWatch = null;
         unsubscribeAll();
         chatObserver?.disconnect();
         chatObserver = null;
@@ -663,6 +674,7 @@ export default {
             notes.push({ level: 'info', text: `RAG CK включён: для русских листов нужна многоязычная модель эмбеддингов (${MULTILINGUAL_HINT}), английская ищет плохо.` });
         }
         if (dictionaryFailed) notes.push({ level: 'warn', text: 'Словарь интерфейса CK не загрузился — переводятся только строки из своего словаря.' });
+        if (isMaestroOwned(MAESTRO_REBUILD)) notes.push({ level: 'info', text: 'Вставку тегов CK («Character Consistency») ведёт Maestro — модуль её не пересобирает. Поиск персонажей в листах и макросах CK остаётся за модулем.' });
         return notes;
     },
 };

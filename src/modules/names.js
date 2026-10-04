@@ -22,6 +22,7 @@ import { DES_KEYS, DES_MODE_NAMES, DES_SELECTORS, desCharacterNameField, desName
 import { buildNameContext, hiddenNames, pairKey } from '../name-context.js';
 import { decideName, decideSheetOwner, findCaseDuplicates, normalizeRussianName, wordForms } from '../lib/russian-names.js';
 import { NAME_INSTRUCTION_RU, replaceExact } from '../lib/service-prompt.js';
+import { notifyNamesChanged } from '../maestro-api.js';
 import { bestAdjacentSpeaker, messageFontColors, namePattern } from '../lib/speaker-colors.js';
 import { menuButton } from '../ui.js';
 
@@ -240,6 +241,7 @@ function onReplyReceived() {
     if (changedRoster) env.des.roster.save();
     saveSettings();
     notifyChange();
+    notifyNamesChanged();
 }
 
 /** Сразу после того, как DES запишет инструкцию трекера (GENERATION_STARTED), просим именительный падеж. */
@@ -294,6 +296,7 @@ function ensureCaseAliases() {
     // Скрытые из «Present Characters» — не NPC: так DES хранит и скрытые формы имени игрока.
     const hidden = hiddenNames(des);
     let changed = false;
+    let aliasesAdded = false;
     for (const card of npc) {
         // Две карточки с одним ключом («Аня» и «аня») — какая из них настоящая, решает пользователь.
         if ((keys.get(desNameKey(card)) ?? []).length > 1 || duplicates.has(card) || hidden.has(card.toLowerCase())) continue;
@@ -317,6 +320,7 @@ function ensureCaseAliases() {
             own(spelling, card);
             counters.caseAliases += 1;
             changed = true;
+            aliasesAdded = true;
         }
     }
     if (!changed) return;
@@ -324,6 +328,7 @@ function ensureCaseAliases() {
     settings.caseAliasesRemoved = removedByUser;
     des.names.save();
     saveSettings();
+    if (aliasesAdded) notifyNamesChanged();
 }
 
 /**
@@ -377,6 +382,7 @@ function restoreAfterWorkshop() {
     env.des.names.save();
     log.info(`Имена: Workshop сохранил свой снимок поверх новых алиасов — возвращено: ${restored}.`);
     notifyChange();
+    notifyNamesChanged();
 }
 
 /**
@@ -434,7 +440,9 @@ function forgetAdoptedPersonaForms() {
         .filter((entry) => entry.kind === 'hide' && entryChat(entry) !== 'other')
         .map((entry) => entry.variant);
     const dropped = des.roster.forgetAdopted(names);
-    if (dropped.length) log.info(`Имена: DES завёл карточки для скрытых форм имени игрока — убраны: ${dropped.map((name) => `«${name}»`).join(', ')}.`);
+    if (!dropped.length) return;
+    log.info(`Имена: DES завёл карточки для скрытых форм имени игрока — убраны: ${dropped.map((name) => `«${name}»`).join(', ')}.`);
+    notifyNamesChanged();
 }
 
 // ─── Раскраска реплик ──────────────────────────────────────────────────────
@@ -681,6 +689,7 @@ function unmerge(entry) {
     log.info(`Имена: «${entry.variant}» отделено от «${entry.canonical}»${removed ? '' : ' (в DES уже не было)'}.`);
     notify('success', `«${entry.variant}» больше не склеивается с «${entry.canonical}». Прошлые ответы остаются как были.`);
     notifyChange();
+    if (removed) notifyNamesChanged();
 }
 
 /**

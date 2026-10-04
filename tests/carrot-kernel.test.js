@@ -185,6 +185,26 @@ test('the tag insert built from a CK template is left alone; without a template 
     ckSheets.CarrotTemplateManager.hasTemplate = true;
 });
 
+test('while Maestro owns the consistency rebuild the insert stays as CK wrote it', async () => {
+    const { setMaestroOwned } = await import('../src/maestro-api.js');
+    ckSheets.CarrotTemplateManager.hasTemplate = false;
+    ckState.setLastInjectedCharacters(['Аня']);
+    try {
+        setMaestroOwned(['ck.consistencyRebuild']);
+        ctx.extensionPrompts['script_inject_carrot-consistency'] = { value: 'CK text', position: 1 };
+        await eventSource.emit(eventTypes.WORLD_INFO_ACTIVATED, [{ world: 'Архив' }]);
+        assert.equal(ctx.extensionPrompts['script_inject_carrot-consistency'].value, 'CK text');
+        assert.ok(carrotKernel.notes().some((note) => note.text.includes('Maestro')));
+        assert.equal(ckSheets.findCharacterByName('Аня').name, 'Аня', 'the finder stays ours');
+        setMaestroOwned([]);
+        await eventSource.emit(eventTypes.WORLD_INFO_ACTIVATED, [{ world: 'Архив' }]);
+        assert.notEqual(ctx.extensionPrompts['script_inject_carrot-consistency'].value, 'CK text');
+    } finally {
+        setMaestroOwned([]);
+        ckSheets.CarrotTemplateManager.hasTemplate = true;
+    }
+});
+
 test('after disable CK keeps a working finder', () => {
     carrotKernel.disable();
     assert.equal(eventSource.count(), 0);
