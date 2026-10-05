@@ -100,6 +100,18 @@
 
 *В надстройке:* модуль 2 дописывает такие формы алиасами ещё до разбора ответа (режим together).
 
+## 10. Chat bubbles drop blocks without text, so standalone images vanish
+
+> With chat bubbles on ("cards" or "discord"), an image that stands in its own paragraph or line disappears. Typical case is a greeting with `![scene](https://…)` between paragraphs or a raw `<img src="…" style="width:50%">` line. Several images in a row disappear too, and so does an image right before a `<font color>` line in the same paragraph.
+> - `getTopLevelBlocks` → `flushPending` (`src/systems/rendering/chatBubbles.js:610-618`) keeps a pending block only if `stripHtml(trimmed).trim()` is non-empty;
+> - `parseBlockIntoSegments` drops a block without `<font>` when `stripHtml(block.innerHTML).trim()` is empty (`:676-683`), and narration between `<font>` tags under the same rule (`:729-731`, `:759-761`).
+>
+> `<img>`, `<video>`, `<audio>`, `<picture>`, `<svg>` and `<canvas>` have no text content, so every block made only of media is removed from the bubbles.
+>
+> Suggested fix: treat a block as non-empty when it contains media, e.g. `stripHtml(html).trim() || /<(img|video|audio|picture|svg|canvas|iframe)\b/i.test(html)`, or check `el.querySelector('img, video, audio, picture, svg, canvas')` on the parsed block.
+
+*В надстройке:* модуль 4, «Картинки в пузырях чата» — невидимая метка после картинок в отрисованном HTML.
+
 ---
 
 # CarrotKernel и BunnyMo

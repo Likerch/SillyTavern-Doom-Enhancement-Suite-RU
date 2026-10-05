@@ -20,7 +20,7 @@
 | `src/lib/` | Чистая логика без DOM: словарь, матчер имён, транслит, нормализатор BunnyMo, правки записей, слова погоды, правки шаблона |
 | `locales/` | Встроенные словари интерфейса DES и CK |
 | `settings.html`, `src/panel.js`, `style.css` | Панель надстройки |
-| `tests/` | Тесты чистой логики |
+| `tests/` | Тесты чистой логики. `tests/helpers/` — маленький DOM и загрузчик настоящего `chatBubbles.js` DES из `vendor/des` для тестов пузырей |
 | `tools/` | Инструменты словаря |
 | `vendor/` | Клоны DES, CarrotKernel и BunnyMo только для чтения. Используются для разведки и не попадают в git |
 
@@ -34,7 +34,9 @@
 
 ## Проверки
 
-- `npm test` — тесты чистой логики. Нужен Node 22+, зависимостей нет.
+- `npm test` — тесты чистой логики. Нужен Node 22+, зависимостей нет. `tests/des-bubbles.test.js` прогоняет настоящий
+  код пузырей DES из клона `vendor/des` (или из папки в переменной `DESRU_DES_DIR`), без клона эти тесты пропускаются.
+  Код DES при этом в репозиторий не попадает.
 - `node tools/check-dictionary.mjs` — проверяет встроенные словари: дубли, плейсхолдеры, теги.
 - `node tools/extract-des-strings.mjs vendor/des --missing locales/ru.json` — строки из кода DES, которых нет в словаре.
   `--stale locales/ru.json` — ключи словаря, которых больше нет в DES. Оба отчёта смотрите глазами: в первом
@@ -49,7 +51,9 @@
 3. Словарь: прогоните оба отчёта `extract-des-strings.mjs`, на живом ST пройдитесь по окнам DES и выгрузите непереведённое
    из панели. Пополните `locales/ru.json` и проверьте его `node tools/check-dictionary.mjs`.
 4. Обновите `DES_INFO.verifiedVersions` и `verifiedCommit` в адаптере. Поднимите версию в `manifest.json` и `package.json`.
-5. Запустите `npm test`, затем пройдите чек-лист `docs/manual-test.md` на живом ST.
+5. Запустите `npm test`, затем пройдите чек-лист `docs/manual-test.md` на живом ST. Тесты «DES as is» в
+   `tests/des-bubbles.test.js` проверяют, что новый DES всё ещё теряет картинки без текста. Если они упали, а тесты
+   с метками прошли, DES, скорее всего, исправил ошибку сам, и «Картинки в пузырях чата» можно пересмотреть.
 
 С новыми CarrotKernel и BunnyMo — то же самое. Нужны `src/ck-adapter.js` (`CK_INFO`, `CK_MODULES`, `CK_UI`),
 `src/bunnymo-adapter.js` (`BUNNYMO_INFO`, сигнатуры записей) и `tools/extract-ck-strings.mjs`.

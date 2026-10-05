@@ -9,10 +9,16 @@
  * 3. «Нет» вместо квеста: DES прячет квест только при значении «None». Приводим к нему.
  * 4. Переводы встроенного переводчика: на каждой смене чата DES стирает `extra.display_text`.
  *    Прячем переводы на время его очистки и возвращаем, ничего не перерисовывая.
+ * 5. Картинки в пузырях чата: DES выбрасывает из пузырей блоки без текста — абзац из одной картинки пропадает.
+ *    Хук форматирования ST ставит после картинок невидимую метку с текстом (src/lib/bubble-media.js).
  */
 import { getContext } from '../st.js';
 import { log } from '../log.js';
-import { DES_KEYS, DES_MODE_NAMES, DES_TIMING, DES_VALUES, desDetailKey, desSceneFieldKey, hasDesOffSceneMarker } from '../des-adapter.js';
+import { getSettings } from '../settings.js';
+import {
+    DES_KEYS, DES_MODE_NAMES, DES_TIMING, DES_VALUES, desDetailKey, desSceneFieldKey, hasDesOffSceneMarker, importDesModuleEarly,
+} from '../des-adapter.js';
+import { markMediaForBubbles } from '../lib/bubble-media.js';
 import { restoreDetailKeys } from '../lib/field-keys.js';
 import { findRussianOffScene, isRussianNoQuest } from '../lib/russian-markers.js';
 import { markOffScene, normalizeNoQuest } from '../lib/tracker-fixes.js';
@@ -41,6 +47,11 @@ const OPTIONS = [
         title: 'Не давать DES стирать переводы',
         description: 'При смене чата DES стирает переводы встроенного переводчика ST. Прячем их на время его очистки и возвращаем.',
     },
+    {
+        key: 'bubbleImages',
+        title: 'Картинки в пузырях чата',
+        description: 'В режиме пузырей («Карточки», «Discord») DES выбрасывает абзацы без текста, и картинки в приветствиях и ответах пропадают. Ставим после картинок невидимую метку, и DES их оставляет. Текст сообщений не меняется. Действует на сообщения, нарисованные после включения: открытый чат — откройте заново.',
+    },
 ];
 
 /** @type {import('../core.js').AddonEnv|null} */
@@ -50,6 +61,10 @@ let subscriptions = [];
 const loggedOnce = new Set();
 /** @type {{ stash: Map<any, string>, frames: number } | null} */
 let hiddenTranslations = null;
+/** Хук форматирования ST стоит. Снять его ST не умеет, поэтому он ставится один раз и сам решает, работать ли. */
+let mediaHookInstalled = false;
+/** Модуль сделал ранний шаг или включён: хук работает. Гард остановил модуль или его выключили — хук молчит. */
+let mediaActive = false;
 
 /** @param {string} key */
 function option(key) {
@@ -219,6 +234,48 @@ function showHiddenTranslations() {
     }
 }
 
+// ─── 5. Картинки в пузырях чата ────────────────────────────────────────────
+
+/** Переключатель читается на лету; в раннем шаге окружения ещё нет — берём настройки напрямую. */
+function bubbleImagesOn() {
+    return (env?.settings ?? getSettings()).modules.fixes?.bubbleImages !== false;
+}
+
+/**
+ * Хук messageFormatter ST (стадия afterMarkdown): метки после картинок в готовом HTML ответа модели.
+ * Сообщение в чате не меняется — только то, что ST вставит в .mes_text и что потом разложит DES.
+ * @param {string} mes
+ * @param {{ isUser?: boolean, isReasoning?: boolean }} [info]
+ */
+function keepMediaInBubbles(mes, info) {
+    if (!mediaActive || info?.isUser || info?.isReasoning || typeof mes !== 'string') return mes;
+    if (!bubbleImagesOn()) return mes;
+    try {
+        return markMediaForBubbles(mes);
+    } catch (error) {
+        logOnce('bubbleImages:error', 'warn', 'Исправления: не удалось расставить метки картинок для пузырей DES.');
+        log.debug('Исправления: сбой меток картинок', error);
+        return mes;
+    }
+}
+
+/** @returns {boolean} хук стоит */
+function installMediaHook() {
+    if (mediaHookInstalled) return true;
+    const formatter = getContext().messageFormatter;
+    if (typeof formatter?.addHook !== 'function') {
+        logOnce('bubbleImages:noFormatter', 'warn', 'Исправления: в этой версии SillyTavern нет messageFormatter (нужна 1.19) — картинки в пузырях DES не исправить.');
+        return false;
+    }
+    // После обычных хуков (NORMAL): картинки, которые вставили другие расширения, тоже получат метку.
+    formatter.addHook(keepMediaInBubbles, {
+        stage: formatter.stage?.AFTER_MARKDOWN ?? 'afterMarkdown',
+        order: formatter.order?.LATE ?? 90,
+    });
+    mediaHookInstalled = true;
+    return true;
+}
+
 // ─── Модуль ────────────────────────────────────────────────────────────────
 
 /** @type {import('../core.js').AddonModule} */
@@ -226,11 +283,17 @@ export default {
     id: 'fixes',
     number: 4,
     title: 'Исправления DES для русского',
-    description: 'Обходит места, где DES ломается на русском. Каждое исправление включается отдельно.',
+    description: 'Обходит места, где DES ломается на русском, и его ошибку с картинками в пузырях чата. Каждое исправление включается отдельно.',
     needs: { ui: true, data: true },
     options: OPTIONS,
+    /** Хук картинок — до первой отрисовки чата: ST открывает последний чат раньше, чем гард пустит модуль. */
+    async preload() {
+        if (!(await importDesModuleEarly('bubbles'))) return;
+        mediaActive = installMediaHook();
+    },
     enable(environment) {
         env = environment;
+        mediaActive = installMediaHook();
         const { eventTypes } = getContext();
         // DES пишет инструкцию трекера в своём обработчике GENERATION_STARTED — правим сразу после него.
         subscribe('makeLast', eventTypes.GENERATION_STARTED, restoreFieldKeysInPrompt);
@@ -258,6 +321,7 @@ export default {
         for (const [event, handler] of subscriptions) eventSource.removeListener(event, handler);
         subscriptions = [];
         showHiddenTranslations();
+        mediaActive = false;
         env = null;
         log.info('Модуль 4 (исправления) выключен.');
     },
@@ -265,6 +329,9 @@ export default {
     notes() {
         if (!env?.des) return [];
         const notes = [];
+        if (option('bubbleImages') && !mediaHookInstalled) {
+            notes.push({ level: 'warn', text: 'Картинки в пузырях не исправляются: в этой версии SillyTavern нет messageFormatter (нужна 1.19).' });
+        }
         const fields = cyrillicCharacterFields();
         if (option('fieldKeys') && fields.length) {
             const mode = env.des.generationMode();
