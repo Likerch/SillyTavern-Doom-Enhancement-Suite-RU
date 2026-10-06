@@ -235,6 +235,60 @@ test('forms of a player character are hidden, never aliased', () => {
     assert.equal(decideName('Ани', ctx).action, 'alias');
 });
 
+test('a different name reaches only a card of this chat; the card from another chat is reported', () => {
+    const elsewhere = { ...context({ npc: ['Офелия Ричардс', 'Дарган', 'Akari'] }), isLocal: () => false };
+    assert.deepEqual(decideName('Офелия', elsewhere), {
+        action: 'skip', reason: '«Офелия Ричардс» есть только в другом чате', remote: { canonical: 'Офелия Ричардс', via: 'часть имени' },
+    });
+    assert.deepEqual(decideName('Капитан Дарган', elsewhere).remote, { canonical: 'Дарган', via: 'звание или обращение' });
+    assert.deepEqual(decideName('Акари', elsewhere).remote, { canonical: 'Akari', via: 'транслит' });
+    assert.deepEqual(decideName('Саша', { ...context({ npc: ['Александр'] }), isLocal: () => false }).remote, { canonical: 'Александр', via: 'уменьшительное' });
+    // Карточка этого чата — склейка как раньше.
+    const here = { ...context({ npc: ['Офелия Ричардс'] }), isLocal: (card, variant) => card === 'Офелия Ричардс' && variant === 'Офелия' };
+    assert.deepEqual(decideName('Офелия', here), { action: 'alias', canonical: 'Офелия Ричардс', via: 'часть имени' });
+});
+
+test('case, register and ё of the same name glue to any card, even from another chat', () => {
+    const elsewhere = { ...context({ npc: ['Офелия', 'Аня Петрова', 'Алёна'] }), isLocal: () => false };
+    assert.deepEqual(decideName('Офелии', elsewhere), { action: 'alias', canonical: 'Офелия', via: 'падеж' });
+    assert.deepEqual(decideName('офелия', elsewhere), { action: 'alias', canonical: 'Офелия', via: 'падеж' });
+    assert.deepEqual(decideName('Ани Петровой', elsewhere), { action: 'alias', canonical: 'Аня Петрова', via: 'падеж' });
+    assert.equal(decideName('Алена', elsewhere).canonical, 'Алёна');
+});
+
+test('a card from another chat is not a target at all: no ambiguity, no report when the pair is excluded', () => {
+    // «Саша» — уменьшительное и от «Александр» (другой чат), и от «Александра» (этот): склеится с ней.
+    const mixed = { ...context({ npc: ['Александр', 'Александра'] }), isLocal: (card) => card === 'Александра' };
+    assert.deepEqual(decideName('Саша', mixed), { action: 'alias', canonical: 'Александра', via: 'уменьшительное' });
+    // Ступень сильнее нашла только чужую карточку, слабее — свою: склеивается со своей.
+    const weaker = { ...context({ npc: ['Аня Петрова', 'Анна'] }), isLocal: (card) => card === 'Анна' };
+    assert.deepEqual(decideName('Аня', weaker), { action: 'alias', canonical: 'Анна', via: 'уменьшительное' });
+    // Две чужие карточки — не о чем спрашивать.
+    const twins = decideName('Аня', { ...context({ npc: ['Аня Петрова', 'Аня Смирнова'] }), isLocal: () => false });
+    assert.equal(twins.remote, undefined);
+    assert.match(twins.reason, /других чатов/);
+    // Разъединённая пара так и остаётся разъединённой.
+    const excluded = (variant, canonical) => (canonical === 'Офелия Ричардс' ? 'разъединено вручную' : null);
+    assert.deepEqual(decideName('Офелия', { ...context({ npc: ['Офелия Ричардс'], excluded }), isLocal: () => false }),
+        { action: 'skip', reason: 'разъединено вручную' });
+});
+
+test('the persona rule does not depend on the chat', () => {
+    const ctx = { ...context({ npc: ['Аня'], users: ['Лиза'] }), userCards: ['Лиза'], isLocal: () => false };
+    assert.deepEqual(decideName('Лизы', ctx), { action: 'hide', persona: 'Лиза', via: 'падеж' });
+    assert.deepEqual(decideName('Лизонька', ctx), { action: 'hide', persona: 'Лиза', via: 'уменьшительное' });
+});
+
+test('a sheet under a fuller name goes only to a short card of this chat', () => {
+    const elsewhere = { ...context({ npc: ['Офелия'] }), isLocal: () => false };
+    assert.equal(decideSheetOwner('Офелия Ричардс', elsewhere).action, 'skip');
+    // То же имя с пояснением и падеж — то же имя.
+    assert.equal(decideSheetOwner('Офелия (сестра)', elsewhere).canonical, 'Офелия');
+    assert.equal(decideSheetOwner('Офелии', elsewhere).canonical, 'Офелия');
+    const here = { ...context({ npc: ['Офелия'] }), isLocal: () => true };
+    assert.deepEqual(decideSheetOwner('Офелия Ричардс', here), { action: 'alias', canonical: 'Офелия', via: 'полное имя' });
+});
+
 test('steps can be switched off', () => {
     const ctx = context({ npc: ['Аня Петрова'] });
     ctx.steps = { parts: false, diminutives: false, translit: false, address: false };

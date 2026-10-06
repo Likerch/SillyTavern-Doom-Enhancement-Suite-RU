@@ -13,7 +13,9 @@
  * Каждая склейка пишется в журнал; «разъединить» убирает алиас и запоминает пару, чтобы не склеить снова.
  * Прошлые ответы уже записаны под именем карточки — разделяются только следующие.
  * Алиасы DES общие для всех чатов, а карточки и скрытые имена у каждого чата свои: скрытие в журнале
- * помнит свой чат и сверяется только в нём.
+ * помнит свой чат и сверяется только в нём. Поэтому другое имя (звание, часть имени, уменьшительное, транслит)
+ * склеивается только с персонажем этого чата (name-context.js, chatLocality); на карточку из другого чата в журнале
+ * остаётся запись «Не склеил» с кнопкой «Склеить». Падеж, регистр и ё — то же имя, их это не касается.
  */
 import { getContext, notify } from '../st.js';
 import { log } from '../log.js';
@@ -49,7 +51,7 @@ const OPTIONS = [
     {
         key: 'nameSteps',
         title: 'Звания, имя без фамилии, уменьшительные, транслит',
-        description: '«Капитан Дарган», «Аня» при «Аня Петрова», «Саша» при «Александр», «Akari» при «Акари» — тоже алиасы. Склеивается, только если подходит ровно одна карточка.',
+        description: '«Капитан Дарган», «Аня» при «Аня Петрова», «Саша» при «Александр», «Akari» при «Акари» — тоже алиасы. Склеивается, только если подходит ровно одна карточка и этот персонаж есть в этом чате: с героем другой истории имя не склеится, но в «Склейках имён» его можно склеить вручную.',
     },
     {
         key: 'personaForms',
@@ -165,7 +167,11 @@ const spellingKey = (pair) => `${pair.variant}|${pair.canonical}`;
 
 // ─── Склейка ───────────────────────────────────────────────────────────────
 
-/** @param {string} variant @param {string} canonical @param {'alias'|'hide'} kind @param {string} via */
+/**
+ * Запись журнала. `alias` — склеено алиасом DES, `hide` — скрыто как форма имени игрока, `remote` — не склеено:
+ * подошла только карточка из другого чата (ключ тот же, что у склейки этой пары, — склейка её заменит).
+ * @param {string} variant @param {string} canonical @param {'alias'|'hide'|'remote'} kind @param {string} via
+ */
 function recordMerge(variant, canonical, kind, via) {
     const settings = moduleSettings();
     /** @type {{ variant: string, canonical: string, kind: string, via: string, at: number, chatId?: string }} */
@@ -205,6 +211,21 @@ function applyDecision(name, decision) {
     return false;
 }
 
+/**
+ * Имя подошло бы к персонажу, который есть только в другом чате: не склеиваем, а пишем в журнал — там его можно
+ * склеить вручную. Одна запись на пару: следующие ответы с тем же именем журнал не трогают.
+ * @param {string} variant
+ * @param {{ canonical: string, via: string }} remote
+ * @returns {boolean} появилась ли запись
+ */
+function recordRemote(variant, { canonical, via }) {
+    const key = pairKey({ variant, canonical });
+    if (asArray(moduleSettings().journal).some((entry) => journalKey(entry) === key)) return false;
+    recordMerge(variant, canonical, 'remote', via);
+    log.info(`Имена: «${variant}» не склеено с «${canonical}» (${VIA_NAMES[via] ?? via}) — этот персонаж есть только в другом чате. Склеить вручную можно в разделе «Склейки имён».`);
+    return true;
+}
+
 /** Ответ модели пришёл (together): до разбора DES дописываем формы имён алиасами. */
 function onReplyReceived() {
     if (!isTogetherMode() || !option('aliasForms')) return;
@@ -216,15 +237,17 @@ function onReplyReceived() {
     const context = buildNameContext(env.des);
     let changedAliases = false;
     let changedRoster = false;
+    let changedJournal = false;
     for (const name of names) {
         const decision = decideName(name, context);
-        if (decision.action === 'skip') {
+        if (decision.action === 'skip' && !decision.remote) {
             if (decision.candidates) log.debug(`Имена: «${name}» подходит нескольким карточкам (${decision.candidates.join(', ')}) — не склеиваю.`);
             continue;
         }
         // Два имени в одном ответе трекера — два персонажа: «Саша» не склеится с «Александром», если он тоже тут
         // (сам или уже известным DES алиасом).
-        const target = decision.action === 'alias' ? decision.canonical : decision.persona;
+        const target = decision.action === 'alias' ? decision.canonical
+            : decision.action === 'hide' ? decision.persona : decision.remote.canonical;
         const targetAliases = asArray(context.aliasesOf?.get(target));
         const twin = names.find((other) => other !== name
             && (desNameKey(other) === desNameKey(target) || includesName(targetAliases, other)));
@@ -232,16 +255,20 @@ function onReplyReceived() {
             log.debug(`Имена: «${name}» и «${twin}» — разные персонажи одного ответа, не склеиваю.`);
             continue;
         }
+        if (decision.action === 'skip') {
+            if (recordRemote(name, decision.remote)) changedJournal = true;
+            continue;
+        }
         if (!applyDecision(name, decision)) continue;
         if (decision.action === 'alias') changedAliases = true;
         else changedRoster = true;
     }
-    if (!changedAliases && !changedRoster) return;
+    if (!changedAliases && !changedRoster && !changedJournal) return;
     if (changedAliases) env.des.names.save();
     if (changedRoster) env.des.roster.save();
     saveSettings();
     notifyChange();
-    notifyNamesChanged();
+    if (changedAliases || changedRoster) notifyNamesChanged();
 }
 
 /** Сразу после того, как DES запишет инструкцию трекера (GENERATION_STARTED), просим именительный падеж. */
@@ -389,7 +416,9 @@ function restoreAfterWorkshop() {
  * Склейки из журнала, которых в DES уже нет: алиас убрали в Workshop или каталоге, скрытое имя вернули на панель.
  * Уважаем это — пара больше не склеивается. Скрытие сверяем только в его чате (у каждого чата свой список
  * скрытых), старые записи без чата сами не разъединяем. Удалённая карточка уносит все свои алиасы — такую склейку
- * просто забываем; удалена ли карточка, видно только в её чате. Пока Workshop открыт или ждёт проверки, не трогаем.
+ * просто забываем; удалена ли карточка, видно только в её чате. Запись «Не склеил» забываем, когда пару решили
+ * в DES (алиас в «Мастерской», ответ в попапе DES) или карточки из другого чата больше нет. Пока Workshop открыт
+ * или ждёт проверки, не трогаем.
  */
 function reconcileJournal() {
     const des = env?.des;
@@ -400,7 +429,16 @@ function reconcileJournal() {
     const settings = moduleSettings();
     const gone = [];
     const deleted = [];
+    /** Записи «Не склеил», которые больше не нужны: пару решили в DES сами или карточки больше нет. */
+    const settled = [];
     for (const entry of asArray(settings.journal)) {
+        if (entry.kind === 'remote') {
+            // Карточка из другого чата общая (knownCharacters настроек DES) — её видно из любого чата. На такое имя DES
+            // часто сам спрашивает попапом «тот же персонаж?»: «Да» дописывает алиас, «Нет» он запоминает — решено.
+            if (includesName(asArray(aliases[entry.canonical]), entry.variant) || !npc.includes(entry.canonical)
+                || des.names.dismissedByDes(entry.variant, entry.canonical)) settled.push(entry);
+            continue;
+        }
         if (entry.kind === 'hide') {
             if (removed && entryChat(entry) === 'this' && !includesName(removed, entry.variant)) gone.push(entry);
             continue;
@@ -413,8 +451,8 @@ function reconcileJournal() {
         else if (npc.includes(entry.canonical)) gone.push(entry);
         else deleted.push(entry);
     }
-    if (!gone.length && !deleted.length) return;
-    const dropped = new Set([...gone, ...deleted]);
+    if (!gone.length && !deleted.length && !settled.length) return;
+    const dropped = new Set([...gone, ...deleted, ...settled]);
     settings.journal = asArray(settings.journal).filter((entry) => !dropped.has(entry));
     const unmerged = asArray(settings.unmerged);
     for (const entry of gone) {
@@ -425,6 +463,7 @@ function reconcileJournal() {
     const list = (entries) => entries.map((entry) => `«${entry.variant}» → «${entry.canonical}»`).join(', ');
     if (gone.length) log.info(`Имена: склейки убраны вне модуля и больше не повторяются: ${list(gone)}.`);
     if (deleted.length) log.info(`Имена: карточки удалены вместе с алиасами — склейки забыты: ${list(deleted)}.`);
+    if (settled.length) log.info(`Имена: «Не склеил» больше не нужно — пару решили в DES или карточки нет: ${list(settled)}.`);
     notifyChange();
 }
 
@@ -564,6 +603,8 @@ function rekeySheets(fresh = new Set()) {
             if (decision.action !== 'alias') {
                 if (fresh.has(key) && decision.action === 'skip' && decision.candidates) {
                     log.info(`Имена: лист «${key}» подходит нескольким карточкам (${decision.candidates.join(', ')}) — оставляю под этим именем.`);
+                } else if (fresh.has(key) && decision.action === 'skip' && decision.remote) {
+                    log.info(`Имена: лист «${key}» похож на «${decision.remote.canonical}», но этот персонаж есть только в другом чате — оставляю под этим именем.`);
                 }
                 continue;
             }
@@ -693,6 +734,53 @@ function unmerge(entry) {
 }
 
 /**
+ * «Склеить» у записи «Не склеил»: имя подошло к персонажу из другого чата, и пользователь решил, что это он.
+ * Дописываем алиас, как сделала бы склейка, и снимаем пару с разъединённых. Дальше это обычная склейка — её можно
+ * разъединить. Прошлые ответы остаются как были.
+ * @param {{ variant: string, canonical: string, via?: string }} entry
+ */
+function glue(entry) {
+    const des = env?.des;
+    if (!des) {
+        notify('error', 'Модуль 2 не работает — алиасы DES сейчас недоступны.');
+        return;
+    }
+    const settings = moduleSettings();
+    const { npc } = des.names.cards();
+    if (!npc.includes(entry.canonical)) {
+        settings.journal = asArray(settings.journal).filter((item) => journalKey(item) !== journalKey(entry));
+        saveSettings();
+        notify('info', `Персонажа «${entry.canonical}» больше нет — склеивать «${entry.variant}» не с чем.`);
+        notifyChange();
+        return;
+    }
+    settings.unmerged = asArray(settings.unmerged).filter((item) => pairKey(item) !== pairKey(entry));
+    const via = entry.via ?? 'вручную';
+    let added = false;
+    if (includesName(asArray(des.names.aliases()[entry.canonical]), entry.variant)) {
+        // Пару уже склеили в DES сами — остаётся записать склейку, чтобы её можно было разъединить.
+        recordMerge(entry.variant, entry.canonical, 'alias', via);
+    } else {
+        added = applyDecision(entry.variant, { action: 'alias', canonical: entry.canonical, via });
+        if (!added) {
+            saveSettings();
+            notify('error', `DES не принял «${entry.variant}» как другое имя «${entry.canonical}».`);
+            notifyChange();
+            return;
+        }
+        des.names.save();
+    }
+    saveSettings();
+    log.info(`Имена: «${entry.variant}» склеено с «${entry.canonical}» вручную (персонаж из другого чата).`);
+    // DES уже завёл в этом чате отдельного персонажа под этим именем: алиас уводит к карточке только новые ответы.
+    const twin = npc.find((card) => card !== entry.canonical && desNameKey(card) === desNameKey(entry.variant));
+    notify('success', `Теперь «${entry.variant}» — это «${entry.canonical}». Прошлые ответы остаются как были.${twin
+        ? ` Персонаж «${twin}», которого DES уже завёл, остаётся — объединить их можно в каталоге персонажей DES.` : ''}`);
+    notifyChange();
+    if (added) notifyNamesChanged();
+}
+
+/**
  * @param {'on'|'makeFirst'|'makeLast'} method
  * @param {string} event
  * @param {(...args: any[]) => unknown} handler
@@ -746,7 +834,8 @@ function mountSection(section) {
     const summary = document.createElement('summary');
     summary.textContent = 'Склейки имён';
     const hint = small('desru-dict-hint', 'Формы имён, которые модель пишет в трекере («Ани», «Капитан Дарган», «Саша»), дописываются алиасами к карточке — их видно и в Workshop DES. '
-        + '«Разъединить» убирает алиас; прошлые ответы остаются под именем карточки, разделяются только следующие.');
+        + '«Разъединить» убирает алиас; прошлые ответы остаются под именем карточки, разделяются только следующие. '
+        + 'Если имя похоже только на персонажа из другого чата, модуль его не склеивает и пишет «Не склеил»: «Склеить» сделает это вручную.');
 
     const list = document.createElement('ul');
     list.className = 'desru-merge-list';
@@ -798,6 +887,12 @@ function mountSection(section) {
         for (const entry of journal) {
             const item = document.createElement('li');
             const text = document.createElement('span');
+            if (entry.kind === 'remote') {
+                text.textContent = `Не склеил «${entry.variant}» с «${entry.canonical}»: «${entry.canonical}» есть только в другом чате · ${formatDate(entry.at)}`;
+                item.append(text, menuButton('fa-link', 'Склеить', () => glue(entry)));
+                list.append(item);
+                continue;
+            }
             const hidden = entry.kind === 'hide';
             const gone = !hidden && aliases && !asArray(aliases[entry.canonical]).some((alias) => alias.toLowerCase() === String(entry.variant).toLowerCase());
             const via = entry.via ? ` (${VIA_NAMES[entry.via] ?? entry.via})` : '';
@@ -890,8 +985,11 @@ export default {
             const shown = duplicates.slice(0, 5).map((pair) => `«${pair.variant}» и «${pair.canonical}»`).join(', ');
             notes.push({ level: 'warn', text: `Похоже на дубли из прошлых ответов: ${shown}${duplicates.length > 5 ? ' и другие' : ''}. Модуль склеивает только новые имена; старые можно объединить в каталоге персонажей DES.` });
         }
-        const merged = asArray(moduleSettings().journal).length;
+        const journal = asArray(moduleSettings().journal);
+        const merged = journal.filter((entry) => entry.kind !== 'remote').length;
         if (merged) notes.push({ level: 'info', text: `Склеено форм: ${merged} — список в разделе «Склейки имён».` });
+        const remote = journal.filter((entry) => entry.kind === 'remote').length;
+        if (remote) notes.push({ level: 'info', text: `Не склеено с персонажами из других чатов: ${remote}. Если это всё-таки они, нажми «Склеить» в разделе «Склейки имён».` });
         const extra = [
             counters.caseAliases && `алиасов-написаний: ${counters.caseAliases}`,
             counters.colors && `цветов реплик: ${counters.colors}`,

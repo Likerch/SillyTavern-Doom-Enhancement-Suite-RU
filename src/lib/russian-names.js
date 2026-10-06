@@ -8,7 +8,8 @@
 //
 // Поверх падежей — ступени слабее: падежи алиасов, звания и японские суффиксы обращения,
 // имя без фамилии, уменьшительные и транслит (decideName). Каждая ступень склеивает, только
-// если подходит ровно одна карточка; иначе решает DES.
+// если подходит ровно одна карточка; иначе решает DES. Ступени слабее падежа ведут к другому
+// имени — они склеивают только с персонажем этого чата (NameContext.isLocal).
 
 import { DIMINUTIVES, FULL_NAMES_BY_DIMINUTIVE } from './russian-diminutives.js';
 import { sameWordAcrossScripts } from './translit.js';
@@ -262,13 +263,24 @@ export function isDiminutiveOf(variant, canonical) {
  * @property {readonly string[]} [userCards] персонажи пользователя: их формы прячем, а не склеиваем
  * @property {{ address?: boolean, parts?: boolean, diminutives?: boolean, translit?: boolean }} [steps]
  *           какие ступени слабее падежей включены (по умолчанию все)
+ * @property {(card: string, variant: string) => boolean} [isLocal] есть ли карточка NPC в этом чате. Алиасы DES
+ *           общие для всех чатов: другое имя (всё, кроме падежа самого имени) склеивается только с персонажем этого
+ *           чата, карточка из другого чата — не цель (см. SAME_NAME_STEP). Без функции — все карточки свои
  */
 
 /**
  * @typedef {{ action: 'alias', canonical: string, via: string }
  *   | { action: 'hide', persona: string, via: string }
- *   | { action: 'skip', reason: string, candidates?: string[] }} NameDecision
+ *   | { action: 'skip', reason: string, candidates?: string[], remote?: { canonical: string, via: string } }} NameDecision
+ * `remote` — имя подошло бы ровно к одной карточке, но она есть только в другом чате: склеить можно вручную.
  */
+
+/**
+ * Ступень, на которой имя из трекера — то же имя карточки: падеж, регистр, ё. Она склеивает с любой карточкой,
+ * и из другого чата: «Офелии» — это «Офелия», где бы она ни была. Остальные ступени ведут к другому имени
+ * («Офелия» → «Офелия Ричардс», «Саша» → «Александр») — там карточка из другого чата может быть другим человеком.
+ */
+const SAME_NAME_STEP = 'падеж';
 
 /**
  * Ступени сравнения: от самой надёжной к самой слабой. Каждая отвечает, подходит ли имя `variant`
@@ -357,10 +369,27 @@ export function decideName(name, context) {
     const npc = [...new Set(context.npcCards)];
     const users = [...new Set(context.userCards ?? [])];
     if (users.includes(variant)) return { action: 'skip', reason: 'это персонаж пользователя' };
+    /** Почему имя нельзя склеить с карточкой `canonical`; `null` — можно. @param {string} canonical */
+    const blocked = (canonical) => {
+        // Имя, которое DES считает другой существующей карточкой, не трогаем: алиас у DES сильнее карточки.
+        const other = (context.cardKeys.get(context.keyOf(variant)) ?? []).find((card) => card !== canonical);
+        if (other !== undefined) return `есть отдельная карточка «${other}»`;
+        return context.excluded(variant, canonical);
+    };
+    /** Карточки из других чатов на первой ступени, где они подошли: не цель склейки, но о них скажем. */
+    /** @type {{ canonical: string, via: string }[]|null} */
+    let remote = null;
 
     for (const step of matchSteps(context)) {
-        const candidates = npc.filter((card) => step.test(normalized, card, variant));
+        let candidates = npc.filter((card) => step.test(normalized, card, variant));
         const personas = users.filter((card) => step.test(normalized, card, variant));
+        if (context.isLocal && step.via !== SAME_NAME_STEP && candidates.length) {
+            const far = candidates.filter((card) => !context.isLocal(card, variant));
+            if (far.length) {
+                candidates = candidates.filter((card) => !far.includes(card));
+                remote ??= far.map((canonical) => ({ canonical, via: step.via }));
+            }
+        }
         if (!candidates.length && !personas.length) continue;
         if (candidates.length + personas.length > 1) {
             return { action: 'skip', reason: 'подходит нескольким карточкам', candidates: [...candidates, ...personas] };
@@ -375,13 +404,16 @@ export function decideName(name, context) {
             return { action: 'hide', persona, via: step.via };
         }
         const canonical = candidates[0];
-        // Имя, которое DES считает другой существующей карточкой, не трогаем: алиас у DES сильнее карточки.
-        const other = (context.cardKeys.get(context.keyOf(variant)) ?? []).find((card) => card !== canonical);
-        if (other !== undefined) return { action: 'skip', reason: `есть отдельная карточка «${other}»` };
-        const reason = context.excluded(variant, canonical);
+        const reason = blocked(canonical);
         if (reason) return { action: 'skip', reason };
         return { action: 'alias', canonical, via: step.via };
     }
+    // Подошла только карточка из другого чата. Если склеить её всё же можно, предложим это сделать вручную.
+    if (remote?.length === 1) {
+        const reason = blocked(remote[0].canonical);
+        return reason ? { action: 'skip', reason } : { action: 'skip', reason: `«${remote[0].canonical}» есть только в другом чате`, remote: remote[0] };
+    }
+    if (remote) return { action: 'skip', reason: `похоже только на персонажей из других чатов: ${remote.map((item) => `«${item.canonical}»`).join(', ')}` };
     return { action: 'skip', reason: 'не похоже ни на одну карточку' };
 }
 
@@ -416,6 +448,7 @@ function significantWords(name) {
  * то же без пояснений и, наконец, карточка, все слова которой есть в имени из листа и среди них — первое
  * значимое слово этого имени (само имя): «Артур Клеймор» — не лист «Клеймора» и не «Мистера Клеймора».
  * Из таких берём самую полную («Флоренс Клеймор» раньше «Флоренс»); две равные — решать пользователю.
+ * Всё, кроме того же имени (падеж, пояснение), ведёт только к персонажу этого чата (NameContext.isLocal).
  * @param {string} name
  * @param {NameContext} context
  * @returns {NameDecision}
@@ -453,7 +486,9 @@ export function decideSheetOwner(name, context) {
     };
     const personas = [...new Set(users)].filter((card) => fit(card) > 0);
     if (personas.length) return { action: 'skip', reason: 'похоже на персонажа пользователя', candidates: personas };
-    const scored = [...new Set(context.npcCards)].map((card) => ({ card, score: fit(card) })).filter(({ score }) => score > 0);
+    // Короткая карточка — другое имя, поэтому только из этого чата: лист «Офелия Ричардс» не уйдёт к «Офелии» из другой истории.
+    const scored = [...new Set(context.npcCards)].map((card) => ({ card, score: fit(card) }))
+        .filter(({ card, score }) => score > 0 && (!context.isLocal || context.isLocal(card, bare)));
     if (!scored.length) return direct;
     const best = Math.max(...scored.map(({ score }) => score));
     const top = scored.filter(({ score }) => score === best).map(({ card }) => card);

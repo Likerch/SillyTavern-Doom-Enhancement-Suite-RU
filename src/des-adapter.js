@@ -856,7 +856,8 @@ function createApi(located, namespaces) {
             fromThoughts: (thoughts) => namesFromThoughts(thoughts),
             /**
              * Карточки DES: NPC (общие и этого чата) — к ним можно дописывать алиасы; персонажи пользователя — нельзя.
-             * @returns {{ npc: string[], users: string[] }}
+             * `chat` — NPC из списка персонажей этого чата; общие (knownCharacters настроек DES) копятся из всех чатов.
+             * @returns {{ npc: string[], users: string[], chat: string[] }}
              */
             cards() {
                 const chatKnown = getContext().chatMetadata?.[DES_KEYS.chatMetadata]?.knownCharacters;
@@ -864,6 +865,7 @@ function createApi(located, namespaces) {
                 return {
                     npc: [...new Set([...keys(settings().knownCharacters), ...keys(chatKnown)])],
                     users: keys(settings().userCharacters),
+                    chat: keys(chatKnown),
                 };
             },
             /** Алиасы DES: { имя карточки: [алиасы] } — копия для чтения. */

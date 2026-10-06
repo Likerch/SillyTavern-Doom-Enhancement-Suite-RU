@@ -12,7 +12,7 @@ console.debug = () => {};
 
 const listeners = {};
 const extensionSettings = {};
-const st = { chat: [], chatId: 'A', chatMetadata: {} };
+const st = { chat: [], chatId: 'A', chatMetadata: {}, name1: 'Игрок', name2: '' };
 const toasts = [];
 /** Узлы, созданные поддельным DOM: панель рисует ими «Склейки имён». */
 const created = [];
@@ -48,6 +48,8 @@ globalThis.SillyTavern = {
         chat: st.chat,
         chatId: st.chatId,
         chatMetadata: st.chatMetadata,
+        name1: st.name1,
+        name2: st.name2,
         extensionSettings,
         saveSettingsDebounced() {},
     }),
@@ -59,7 +61,8 @@ const { default: names } = await import('../src/modules/names.js');
 let des;
 
 function fakeDes() {
-    const state = { mode: 'together', aliases: {}, users: {}, thoughts: null, chats: {}, workshop: false, reapplied: 0 };
+    // `global` — общие карточки DES (knownCharacters настроек): копятся из всех чатов, видны в любом.
+    const state = { mode: 'together', aliases: {}, users: {}, global: {}, thoughts: null, chats: {}, workshop: false, reapplied: 0 };
     const chat = () => (state.chats[st.chatId] ??= { known: {}, removed: [], colors: {}, sheets: {} });
     return {
         state,
@@ -67,7 +70,11 @@ function fakeDes() {
         generationMode: () => state.mode,
         workshopOpen: () => state.workshop,
         names: {
-            cards: () => ({ npc: Object.keys(chat().known), users: Object.keys(state.users) }),
+            cards: () => ({
+                npc: [...new Set([...Object.keys(state.global), ...Object.keys(chat().known)])],
+                users: Object.keys(state.users),
+                chat: Object.keys(chat().known),
+            }),
             aliases: () => Object.fromEntries(Object.entries(state.aliases).map(([card, list]) => [card, [...list]])),
             addAlias(canonical, alias) {
                 const list = state.aliases[canonical] ?? [];
@@ -82,7 +89,8 @@ function fakeDes() {
                 state.aliases[canonical] = list.filter((item) => item.toLowerCase() !== alias.toLowerCase());
                 return true;
             },
-            dismissedByDes: () => false,
+            // Ответы «Нет» в попапе DES «тот же персонаж?»: «вариант|карточка».
+            dismissedByDes: (variant, canonical) => (state.dismissed ?? []).includes(`${variant}|${canonical}`),
             save() {},
             fromReply: (text) => JSON.parse(/TRACKER:(\[.*?\])/.exec(String(text))?.[1] ?? '[]'),
             fromThoughts: (thoughts) => (thoughts ? JSON.parse(thoughts).map((entry) => entry.name) : []),
@@ -126,15 +134,17 @@ async function openChat(id) {
     await settle();
 }
 
-/** Ответ модели в режиме together: трекер с этими именами. */
-function reply(names, text = '') {
-    st.chat.splice(0, st.chat.length, { is_user: false, mes: `${text}${names ? ` TRACKER:${JSON.stringify(names)}` : ''}` });
+/** Ответ модели в режиме together: трекер с этими именами; `history` — тексты сообщений чата до него. */
+function reply(names, text = '', history = []) {
+    const earlier = history.map((mes) => ({ is_user: false, mes }));
+    st.chat.splice(0, st.chat.length, ...earlier, { is_user: false, mes: `${text}${names ? ` TRACKER:${JSON.stringify(names)}` : ''}` });
     fire('message_received');
 }
 
 beforeEach(() => {
     extensionSettings.desru = {};
     st.chatId = 'A';
+    st.name2 = '';
     st.chat.length = 0;
     toasts.length = 0;
     des = fakeDes();
@@ -333,14 +343,28 @@ test('disable drops the Workshop check, so the next start reconciles again', asy
     assert.deepEqual(settings().unmerged, [{ variant: 'Ани', canonical: 'Аня' }]);
 });
 
-/** Нажать «Разъединить» у записи в панели «Склейки имён» (панель рисуется поддельным DOM). */
-function unmergeFromPanel(entry) {
+/**
+ * Нарисовать панель «Склейки имён» поддельным DOM и вернуть строки журнала: текст и подпись кнопки.
+ * @returns {{ text: string, button: string, click: () => void }[]}
+ */
+function panelJournal() {
     created.length = 0;
-    names.mountSection(fakeElement('details'));
+    const section = fakeElement('details');
+    names.mountSection(section);
+    const list = section.children.find((node) => node.className === 'desru-merge-list');
     const label = (node) => node.children.find((child) => child.tag === 'span')?.textContent;
-    const button = created.find((node) => node.tag === 'div' && label(node) === 'Разъединить');
-    assert.ok(button, `нет кнопки «Разъединить» для «${entry.variant}»`);
-    button.onClick();
+    return list.children.filter((item) => item.children.length === 2).map((item) => ({
+        text: item.children[0].textContent,
+        button: label(item.children[1]),
+        click: () => item.children[1].onClick(),
+    }));
+}
+
+/** Нажать «Разъединить» у записи в панели «Склейки имён». */
+function unmergeFromPanel(entry) {
+    const row = panelJournal().find((item) => item.button === 'Разъединить' && item.text.includes(`«${entry.variant}»`));
+    assert.ok(row, `нет кнопки «Разъединить» для «${entry.variant}»`);
+    row.click();
 }
 
 test('Maestro hears about alias and hidden-name changes, not about replies that change nothing', async () => {
@@ -371,4 +395,150 @@ test('Maestro hears about alias and hidden-name changes, not about replies that 
     } finally {
         off();
     }
+});
+
+// ─── Склейка только с персонажами этого чата ───────────────────────────────
+
+test('a new name is not glued to a character known only from another chat: the journal offers «Склеить»', async () => {
+    const { createApi } = await import('../src/maestro-api.js');
+    const api = createApi({ des: () => des });
+    let calls = 0;
+    const off = api.onNamesChanged(() => {
+        calls += 1;
+    });
+    try {
+        // «Офелия Ричардс» — из прошлой истории: в общих карточках DES, в этом чате её нет.
+        des.state.global = { 'Офелия Ричардс': {} };
+        des.chat().known = { 'Аня': {} };
+        await enable();
+        reply(['Офелия'], 'Офелия поправила шляпку.');
+        assert.deepEqual(des.state.aliases, {});
+        assert.equal(calls, 0, 'nothing changed in DES');
+        assert.deepEqual(settings().journal.map(({ variant, canonical, kind, via, chatId }) => ({ variant, canonical, kind, via, chatId })),
+            [{ variant: 'Офелия', canonical: 'Офелия Ричардс', kind: 'remote', via: 'часть имени', chatId: 'A' }]);
+        // Следующий ответ с тем же именем — та же запись, а не новая.
+        reply(['Офелия']);
+        assert.equal(settings().journal.length, 1);
+        // Смена чата не делает из записи разъединённую пару.
+        await openChat('B');
+        await openChat('A');
+        assert.equal(settings().journal.length, 1);
+        assert.deepEqual(settings().unmerged ?? [], []);
+
+        const [row] = panelJournal();
+        assert.equal(row.text.split(' · ')[0], 'Не склеил «Офелия» с «Офелия Ричардс»: «Офелия Ричардс» есть только в другом чате');
+        assert.equal(row.button, 'Склеить');
+        row.click();
+        assert.deepEqual(des.state.aliases, { 'Офелия Ричардс': ['Офелия'] });
+        assert.equal(calls, 1, 'Maestro hears about the glue');
+        assert.match(toasts.at(-1)?.[1] ?? '', /Теперь «Офелия» — это «Офелия Ричардс»/);
+        assert.deepEqual(settings().journal.map(({ kind }) => kind), ['alias']);
+
+        // Дальше это обычная склейка: «Разъединить» убирает алиас и запоминает пару.
+        const [glued] = panelJournal();
+        assert.equal(glued.button, 'Разъединить');
+        glued.click();
+        assert.deepEqual(des.state.aliases, { 'Офелия Ричардс': [] });
+        assert.deepEqual(settings().unmerged, [{ variant: 'Офелия', canonical: 'Офелия Ричардс' }]);
+        assert.equal(calls, 2);
+        // Разъединённая пара не возвращается и записью «Не склеил».
+        reply(['Офелия']);
+        assert.deepEqual(settings().journal, []);
+    } finally {
+        off();
+    }
+});
+
+test('a character of this chat is still a glue target: its roster, the scene, the ST card, the messages', async () => {
+    des.state.global = { 'Офелия Ричардс': {} };
+    await enable();
+    // В списке персонажей DES этого чата.
+    des.chat().known = { 'Офелия Ричардс': {} };
+    reply(['Офелия']);
+    assert.deepEqual(des.state.aliases, { 'Офелия Ричардс': ['Офелия'] });
+
+    const glued = async (setup, name = 'Саша') => {
+        names.disable();
+        des = fakeDes();
+        des.state.global = { 'Александр': {} };
+        extensionSettings.desru = {};
+        st.name2 = '';
+        const history = setup() ?? [];
+        await enable();
+        reply([name], '', history);
+        return des.state.aliases['Александр'] ?? [];
+    };
+    // Сейчас в «Персонажах в сцене».
+    assert.deepEqual(await glued(() => {
+        des.state.thoughts = JSON.stringify([{ name: 'Александр' }]);
+    }), ['Саша']);
+    // Карточка ST этого чата.
+    assert.deepEqual(await glued(() => {
+        st.name2 = 'Александр';
+    }), ['Саша']);
+    // Назван в сообщениях чата, в любом падеже.
+    assert.deepEqual(await glued(() => ['Ты снова встретил Александра Петровича?', 'С Александром всё в порядке.']), ['Саша']);
+    // Нигде — только запись «Не склеил».
+    assert.deepEqual(await glued(() => ['Саша помахал рукой.']), []);
+    assert.equal(settings().journal[0].kind, 'remote');
+});
+
+test('a card named only inside the new name is not this chat\'s character', async () => {
+    des.state.global = { 'Дарган': {} };
+    await enable();
+    reply(['Капитан Дарган'], 'Капитан Дарган отдал приказ.', ['Капитану Даргану доложили о гостях.']);
+    assert.deepEqual(des.state.aliases, {});
+    assert.equal(settings().journal[0].kind, 'remote');
+    // Его зовут и просто «Дарган» — значит, этот персонаж здесь есть.
+    reply(['Капитан Дарган'], 'Дарган кивнул.');
+    assert.deepEqual(des.state.aliases, { 'Дарган': ['Капитан Дарган'] });
+    assert.deepEqual(settings().journal.map(({ kind }) => kind), ['alias']);
+});
+
+test('case, register and ё of a name glue even to a card from another chat', async () => {
+    des.state.global = { 'Офелия': {}, 'Алёна': {} };
+    await enable();
+    reply(['Офелии', 'алена']);
+    assert.deepEqual(des.state.aliases, { 'Офелия': ['Офелии'], 'Алёна': ['алена'] });
+    assert.deepEqual(settings().journal.map(({ variant, kind, via }) => `${variant}:${kind}:${via}`), ['Офелии:alias:падеж', 'алена:alias:падеж']);
+});
+
+test('a «Не склеил» entry goes away once its card is gone or the pair is settled in DES', async () => {
+    des.state.global = { 'Офелия Ричардс': {}, 'Александр': {}, 'Дарган': {} };
+    await enable();
+    reply(['Офелия', 'Саша', 'Капитан Дарган']);
+    assert.deepEqual(settings().journal.map(({ variant }) => variant), ['Офелия', 'Саша', 'Капитан Дарган']);
+    delete des.state.global['Офелия Ричардс'];
+    des.state.aliases['Александр'] = ['Саша'];
+    // На «Капитана Даргана» DES спросил попапом и услышал «Нет».
+    des.state.dismissed = ['Капитан Дарган|Дарган'];
+    await openChat('A');
+    assert.deepEqual(settings().journal, []);
+    assert.deepEqual(settings().unmerged ?? [], []);
+});
+
+test('«Склеить» for a card that was deleted meanwhile only drops the entry', async () => {
+    des.state.global = { 'Офелия Ричардс': {} };
+    await enable();
+    reply(['Офелия']);
+    const [row] = panelJournal();
+    delete des.state.global['Офелия Ричардс'];
+    row.click();
+    assert.deepEqual(des.state.aliases, {});
+    assert.deepEqual(settings().journal, []);
+    assert.match(toasts.at(-1)?.[1] ?? '', /больше нет/);
+});
+
+test('a persona form is hidden as before, and a hidden name is not a glue target', async () => {
+    des.state.users = { 'Лиза': {} };
+    des.state.global = { 'Аня Петрова': {} };
+    des.chat().known = { 'Аня Петрова': {} };
+    await enable();
+    reply(['Лизонька']);
+    assert.deepEqual(des.chat().removed, ['Лизонька']);
+    // «Аня Петрова» скрыта в этом чате — не цель склейки, даже будучи здешней.
+    des.chat().removed.push('Аня Петрова');
+    reply(['Аня']);
+    assert.equal(des.state.aliases['Аня Петрова'], undefined);
+    assert.deepEqual(settings().journal.map(({ kind }) => kind), ['hide']);
 });
