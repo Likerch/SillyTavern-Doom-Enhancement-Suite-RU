@@ -122,3 +122,7 @@ test('campaign names are data, the Unfiled label is chrome', () => {
     assert.ok(DES_UI.exclude.includes('.rpg-lb-campaign-group:not(.unfiled-group) .rpg-lb-campaign-name'));
     assert.ok(![...DES_UI.noCollect, ...DES_UI.exclude].includes('.rpg-lb-campaign-name'));
 });
+
+test('sections other extensions add to DES windows opt out of translation', () => {
+    assert.ok(DES_UI.exclude.includes('[data-desru-skip]'));
+});

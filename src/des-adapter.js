@@ -135,6 +135,8 @@ export const DES_UI = Object.freeze({
     /** Данные: не переводим и не собираем (действует во всех корнях). */
     exclude: Object.freeze([
         'input', 'textarea', 'pre', 'script', 'style', '[contenteditable="true"]', '.rpg-editable',
+        // разделы других расширений внутри окон DES (вкладка Dramatis от Maestro и т. п.): свой текст, свой язык
+        '[data-desru-skip]',
         // Present Characters
         '.dooms-portrait-card-name', '.dooms-portrait-card-emoji', '.dooms-pb-back-name', '.dooms-pb-back-value', '.dooms-pb-back-emoji',
         // мысли и пузыри (на случай, если хром-узел окажется внутри)
