@@ -82,13 +82,15 @@ eventSource.on(eventTypes.WORLD_INFO_ACTIVATED, ck);
 eventSource.on(eventTypes.GENERATION_ENDED, () => setExtensionPrompt('script_inject_carrot-consistency', '', IN_CHAT, 4, true));
 
 const { default: bunnymo } = await import('../src/modules/bunnymo.js');
+/** Теги, записанные по персонажам (хранилище v2). */
+const recordedTags = () => Object.values(ctx.chatMetadata.desru_bunnymo?.chars ?? {}).flatMap((entry) => entry.tags);
 bunnymo.enable({ des: null });
 
 test('the lock is in ordinary generations with BunnyMo, and only while they run', async () => {
     assert.equal(prompts.desru_bunnymo_language.value, '', 'nothing before the first generation');
     assert.deepEqual(await generate('normal', { activated: [core[0], archive] }), { lock: true, sceneTags: false });
     assert.equal(prompts.desru_bunnymo_language.value, '', 'cleared after GENERATION_ENDED');
-    assert.deepEqual(ctx.chatMetadata.desru_bunnymo.tags, ['<JEALOUSY:POSSESSIVE>', '<TRAIT:CLINGY>']);
+    assert.deepEqual(recordedTags(), ['<JEALOUSY:POSSESSIVE>', '<TRAIT:CLINGY>']);
     assert.deepEqual(await generate('normal', { activated: [tavern] }), { lock: false, sceneTags: true }, 'no BunnyMo, no CK: no lock');
     assert.deepEqual(await generate('normal', { activated: [{ ...tavern, ck: true }] }), { lock: true, sceneTags: true }, 'CK inserts only');
 });
@@ -133,7 +135,7 @@ test('while Maestro owns the scan-only tag slot the module leaves it empty, and 
         setMaestroOwned(['bunnymo.scanTags']);
         assert.equal(prompts.desru_bunnymo_tags.value, '', 'cleared at once, not on the next generation');
         assert.deepEqual(await generate('normal', { activated: [core[0], archive] }), { lock: true, sceneTags: false });
-        assert.deepEqual(ctx.chatMetadata.desru_bunnymo.tags, ['<JEALOUSY:POSSESSIVE>', '<TRAIT:CLINGY>'], 'tags are still recorded');
+        assert.deepEqual(recordedTags(), ['<JEALOUSY:POSSESSIVE>', '<TRAIT:CLINGY>'], 'tags are still recorded');
         assert.ok(bunnymo.notes().some((note) => note.text.includes('Maestro')));
         setMaestroOwned([]);
         assert.ok(prompts.desru_bunnymo_tags.value.includes('<JEALOUSY:POSSESSIVE>'));

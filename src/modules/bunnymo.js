@@ -13,6 +13,7 @@
  *    всеми падежами имени.
  * 3. Нормализатор ответа (MESSAGE_RECEIVED, раньше DES и CK): переведённые служебные токены — обратно.
  * 4. Теги персонажей сцены — во вставку «только для сканирования»: паки срабатывают и с запретом рекурсии.
+ *    Только тех, кто сейчас в сцене по трекеру DES: ушедшие больше не тянут свои паки каждый ход.
  *
  * Флаги рекурсии записей (часть п. 2) и вставку тегов сцены (п. 4) может взять на себя Maestro (src/maestro-api.js):
  * пока они у него, модуль их пропускает.
@@ -27,11 +28,12 @@ import { normalizeMachineLayer } from '../lib/bunnymo-normalize.js';
 import { archiveFormsOf, patchEntries } from '../lib/bunnymo-patch.js';
 import { LANGUAGE_LOCK_RU } from '../lib/bunnymo-ru.js';
 import { wordForms } from '../lib/russian-names.js';
+import { aliasGroups, readSceneTags, recordSceneTags, sceneTagList } from '../lib/scene-tags.js';
 import { isMaestroOwned, onOwnershipChange } from '../maestro-api.js';
 
 /** Наши слоты extension-промптов. */
 const SLOTS = Object.freeze({ lock: 'desru_bunnymo_language', tags: 'desru_bunnymo_tags' });
-/** chat_metadata[...]: теги персонажей последней генерации — чтобы паки сработали и после перезагрузки страницы. */
+/** chat_metadata[...]: теги персонажей по именам — чтобы паки сработали и после перезагрузки страницы. */
 const META_KEY = 'desru_bunnymo';
 /** Сколько нерешённых тегов держим для панели. */
 const UNRESOLVED_LIMIT = 20;
@@ -70,7 +72,7 @@ const OPTIONS = [
     {
         key: 'packTags',
         title: 'Паки по тегам персонажей сцены',
-        description: 'Теги персонажей из сработавших архивов идут в скрытую вставку для сканирования лорбуков: так срабатывают и паки, закрытые от рекурсии (BunnyRX, CoT-линзы, часть BSM-5 и MBTI). Отстаёт на один ответ.',
+        description: 'Теги персонажей из сработавших архивов идут в скрытую вставку для сканирования лорбуков: так срабатывают и паки, закрытые от рекурсии (BunnyRX, CoT-линзы, часть BSM-5 и MBTI). Только тех, кто сейчас в сцене по трекеру DES (без трекера — чьи архивы сработали в прошлом ответе): ушедшие из сцены не тянут свои паки. Отстаёт на один ответ.',
     },
 ];
 
@@ -140,18 +142,42 @@ function notifyChange() {
     }
 }
 
-/** @returns {{ names: string[], tags: string[] }|null} теги персонажей последней генерации в этом чате */
-function sceneTags() {
-    const saved = getContext().chatMetadata?.[META_KEY];
-    return saved && Array.isArray(saved.tags) ? { names: Array.isArray(saved.names) ? saved.names : [], tags: saved.tags } : null;
+/** @returns {import('../lib/scene-tags.js').SceneTagStore} теги персонажей этого чата по именам */
+function tagStore() {
+    return readSceneTags(getContext().chatMetadata?.[META_KEY]);
 }
 
-/** @param {{ names: string[], tags: string[] }} value */
+/** @param {import('../lib/scene-tags.js').SceneTagStore} value */
 function saveSceneTags(value) {
     const ctx = getContext();
-    if (!ctx.chatMetadata || JSON.stringify(sceneTags()) === JSON.stringify(value)) return;
+    if (!ctx.chatMetadata || JSON.stringify(ctx.chatMetadata[META_KEY]) === JSON.stringify(value)) return;
     ctx.chatMetadata[META_KEY] = value;
     ctx.saveMetadataDebounced?.();
+}
+
+/** Кто в сцене по трекеру DES; null — трекера нет или в нём нет списка персонажей. */
+function presentNames() {
+    const des = env?.des;
+    if (!des) return null;
+    try {
+        const thoughts = des.tracker.read()?.characterThoughts;
+        if (!thoughts) return null;
+        return des.names.fromThoughts(thoughts);
+    } catch (error) {
+        log.debug('BunnyMo: трекер DES не прочитан', error);
+        return null;
+    }
+}
+
+/** Теги персонажей сцены: кто в сцене сейчас и чьи у них теги. */
+function sceneTags() {
+    let groups = [];
+    try {
+        groups = aliasGroups(env?.des?.names.aliases());
+    } catch {
+        groups = [];
+    }
+    return sceneTagList(tagStore(), presentNames(), groups);
 }
 
 /** Все лорбуки BunnyMo, которые видели в сканировании, и отмеченные в CK. */
@@ -199,16 +225,8 @@ function onWorldInfoActivated(entryList) {
     if (scanIsQuiet() || !Array.isArray(entryList) || !entryList.length) return;
     const worlds = bunnyWorlds();
     if (entryList.some((entry) => worlds.has(entry?.world) || isCharacterArchive(entry))) activeNow = true;
-    /** @type {Set<string>} */
-    const tags = new Set();
-    const names = [];
-    for (const entry of entryList) {
-        if (!isCharacterArchive(entry)) continue;
-        const archive = archiveTags(entry);
-        if (archive.name) names.push(archive.name);
-        archive.tags.forEach((tag) => tags.add(tag));
-    }
-    if (tags.size) saveSceneTags({ names, tags: [...tags] });
+    const archives = entryList.filter((entry) => isCharacterArchive(entry)).map((entry) => archiveTags(entry));
+    if (archives.some((archive) => archive.name && archive.tags.length)) saveSceneTags(recordSceneTags(tagStore(), archives, Date.now()));
     if (lockWanted()) setLanguageLock(LANGUAGE_LOCK_RU);
     notifyChange();
 }
@@ -255,8 +273,7 @@ const sceneTagsWanted = () => option('packTags') && !isMaestroOwned(MAESTRO.scan
  */
 function setSceneTags() {
     const { setExtensionPrompt } = getContext();
-    const entry = sceneTags();
-    const value = sceneTagsWanted() && entry?.tags.length ? entry.tags.join(' ') : '';
+    const value = sceneTagsWanted() ? sceneTags().tags.join(' ') : '';
     setExtensionPrompt(SLOTS.tags, value, PROMPT_POSITION.NONE, 0, true, PROMPT_ROLE.SYSTEM,
         () => Boolean(env) && sceneTagsWanted() && !scanIsQuiet());
 }
@@ -392,7 +409,7 @@ function mountSection(section) {
             const vocabularySize = [...scan.vocabulary.values()].reduce((sum, set) => sum + set.size, 0);
             if (vocabularySize) lines.push(`Словарь тегов паков: ${vocabularySize}.`);
             const tags = sceneTags();
-            if (tags) lines.push(`Теги сцены для паков (${tags.names.join(', ') || 'без имени'}): ${tags.tags.length}.`);
+            lines.push(tags.tags.length ? `Теги сцены для паков (${tags.names.join(', ')}): ${tags.tags.length}.` : 'Теги сцены для паков: никого из сцены с архивом.');
             if (normalizedMessages) lines.push(`Ответов с исправленным машинным слоем: ${normalizedMessages}.`);
             if (unresolved.length) lines.push(`Теги, по которым паки не сработают (не по-английски или такого значения нет в подключённых паках): ${unresolved.join(' ')}`);
         }
