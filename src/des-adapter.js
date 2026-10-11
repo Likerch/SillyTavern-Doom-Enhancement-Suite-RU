@@ -223,6 +223,8 @@ export const DES_MODULES = Object.freeze({
     bubbles: {
         path: 'src/systems/rendering/chatBubbles.js',
         exports: { applyChatBubbles: 'function', clearBubbleState: 'function', revertLastMessageBubbles: 'function' },
+        // Раскладка всего чата с ленивой докладкой невидимых; без неё сообщения раскладываются все сразу.
+        optionalExports: { applyAllChatBubbles: 'function' },
         optional: true,
     },
     fullsheet: {
@@ -368,7 +370,41 @@ export const DES_TIMING = Object.freeze({
      * в своей очистке на CHAT_CHANGED (onChatChangedTtsCleanup в index.js).
      */
     displayTextCleanupChunk: 50,
+    /**
+     * Через сколько мс после CHARACTER_MESSAGE_RENDERED, MESSAGE_UPDATED и MESSAGE_SWIPED DES раскладывает сообщение
+     * по пузырям (ждёт перекраску реплик, index.js 2.6.0), и через сколько после GENERATION_STOPPED проверяет
+     * последнее сообщение (onGenerationStoppedBubbleSafetyNet).
+     */
+    bubblesAfterEvent: 800,
+    bubblesStoppedCheck: 1200,
 });
+
+/**
+ * Пузыри сообщения глазами DES. `none` — DES его не раскладывал (или уже сбросил раскладку перед новой);
+ * `laid` — разметка пузырей на месте; `lost` — атрибут «разложено» на .mes_text остался, а разметки нет: текст
+ * перерисовали (ST updateMessageBlock, innerHTML), не сообщив DES событием. Атрибут живёт на самом .mes_text,
+ * который перерисовка не заменяет, поэтому сам DES такое сообщение больше не тронет.
+ * @param {Element|null|undefined} messageElement `.mes`
+ * @returns {'none'|'laid'|'lost'}
+ */
+export function desBubbleState(messageElement) {
+    const mesText = messageElement?.querySelector('.mes_text');
+    if (!mesText || !mesText.hasAttribute(DES_SELECTORS.bubblesAppliedAttribute)) return 'none';
+    return mesText.querySelector(DES_SELECTORS.bubbles) ? 'laid' : 'lost';
+}
+
+/**
+ * Разложить сообщение заново, как это делают обработчики событий DES: забыть прежнюю раскладку и разложить текст,
+ * который сейчас в .mes_text.
+ * @param {{ clearBubbleState: (mesText: Element) => void, applyChatBubbles: (element: Element, mode: string) => void }} bubbles chatBubbles.js DES
+ * @param {Element} messageElement `.mes`
+ * @param {string} mode режим пузырей DES
+ */
+export function relayDesBubbles(bubbles, messageElement, mode) {
+    const mesText = messageElement.querySelector('.mes_text');
+    if (mesText) bubbles.clearBubbleState(mesText);
+    bubbles.applyChatBubbles(messageElement, mode);
+}
 
 /**
  * Ключ JSON, который DES строит из названия поля персонажа: только латиница и цифры в snake_case.
@@ -989,6 +1025,8 @@ function createApi(located, namespaces) {
                     bubbles.applyChatBubbles(element, mode);
                 });
             },
+            /** @param {Element|null|undefined} messageElement @returns {'none'|'laid'|'lost'} см. desBubbleState */
+            state: (messageElement) => desBubbleState(messageElement),
             /**
              * Сообщение, чей текст перерисовал кто-то другой (innerHTML), когда пузыри уже стояли: DES считает,
              * что они на месте (атрибут остался), а разметки уже нет. Раскладываем заново.
@@ -996,12 +1034,25 @@ function createApi(located, namespaces) {
              */
             restoreIfLost(messageElement) {
                 const mode = String(settings().chatBubbleMode ?? DES_KEYS.bubblesOff);
-                const mesText = messageElement?.querySelector('.mes_text');
-                if (!bubbles || mode === DES_KEYS.bubblesOff || !mesText) return false;
-                if (!mesText.hasAttribute(DES_SELECTORS.bubblesAppliedAttribute) || mesText.querySelector(DES_SELECTORS.bubbles)) return false;
-                attempt('перерисовку пузырей', () => {
-                    bubbles.clearBubbleState(mesText);
-                    bubbles.applyChatBubbles(messageElement, mode);
+                if (!bubbles || mode === DES_KEYS.bubblesOff || desBubbleState(messageElement) !== 'lost') return false;
+                attempt('перерисовку пузырей', () => relayDesBubbles(bubbles, /** @type {Element} */ (messageElement), mode));
+                return true;
+            },
+            /**
+             * Разложить сообщения, которых DES ещё не раскладывал. «Show more messages» вставляет старые сообщения
+             * и шлёт только MORE_MESSAGES_LOADED, а DES на него пузыри не раскладывает. Видимые раскладываются
+             * сразу, остальные — когда до них докрутят (applyAllChatBubbles DES; без него — все сразу).
+             * Уже разложенные DES пропускает сам.
+             * @returns {boolean} было ли что раскладывать
+             */
+            applyMissing() {
+                const mode = String(settings().chatBubbleMode ?? DES_KEYS.bubblesOff);
+                if (!bubbles || mode === DES_KEYS.bubblesOff) return false;
+                const fresh = [...document.querySelectorAll('#chat .mes[mesid]')].filter((element) => desBubbleState(element) === 'none');
+                if (!fresh.length) return false;
+                attempt('раскладку пузырей', () => {
+                    if (typeof bubbles.applyAllChatBubbles === 'function') bubbles.applyAllChatBubbles();
+                    else for (const element of fresh) bubbles.applyChatBubbles(element, mode);
                 });
                 return true;
             },

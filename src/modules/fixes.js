@@ -11,6 +11,9 @@
  *    Прячем переводы на время его очистки и возвращаем, ничего не перерисовывая.
  * 5. Картинки в пузырях чата: DES выбрасывает из пузырей блоки без текста — абзац из одной картинки пропадает.
  *    Хук форматирования ST ставит после картинок невидимую метку с текстом (src/lib/bubble-media.js).
+ * 6. Пузыри там, где DES их не разложил: сообщение перерисовали без события ST (DES считает пузыри на месте,
+ *    а их уже нет) или подгрузили кнопкой «Show more messages» (DES её не слушает). Сторож (src/lib/bubble-guard.js)
+ *    раскладывает такие сообщения заново — без похода в редактор сообщения.
  */
 import { getContext } from '../st.js';
 import { log } from '../log.js';
@@ -18,6 +21,7 @@ import { getSettings } from '../settings.js';
 import {
     DES_KEYS, DES_MODE_NAMES, DES_TIMING, DES_VALUES, desDetailKey, desSceneFieldKey, hasDesOffSceneMarker, importDesModuleEarly,
 } from '../des-adapter.js';
+import { BubbleGuard } from '../lib/bubble-guard.js';
 import { markMediaForBubbles } from '../lib/bubble-media.js';
 import { restoreDetailKeys } from '../lib/field-keys.js';
 import { findRussianOffScene, isRussianNoQuest } from '../lib/russian-markers.js';
@@ -52,6 +56,11 @@ const OPTIONS = [
         title: 'Картинки в пузырях чата',
         description: 'В режиме пузырей («Карточки», «Discord») DES выбрасывает абзацы без текста, и картинки в приветствиях и ответах пропадают. Ставим после картинок невидимую метку, и DES их оставляет. Текст сообщений не меняется. Действует на сообщения, нарисованные после включения: открытый чат — откройте заново.',
     },
+    {
+        key: 'restoreBubbles',
+        title: 'Пузыри без похода в редактор',
+        description: 'DES раскладывает сообщение по пузырям, только когда ST сообщает, что нарисовал его. Если текст перерисовало другое расширение и не сообщило, DES считает пузыри на месте, а их уже нет, — сообщение остаётся без карточек, пока не откроешь и не закроешь редактор. Сообщения, подгруженные кнопкой «Show more messages», DES не раскладывает совсем. Раскладываем такие сообщения сами. Текст сообщений не меняется.',
+    },
 ];
 
 /** @type {import('../core.js').AddonEnv|null} */
@@ -65,6 +74,12 @@ let hiddenTranslations = null;
 let mediaHookInstalled = false;
 /** Модуль сделал ранний шаг или включён: хук работает. Гард остановил модуль или его выключили — хук молчит. */
 let mediaActive = false;
+/** @type {BubbleGuard|null} */
+let bubbleGuard = null;
+/** @type {MutationObserver|null} */
+let chatObserver = null;
+/** @type {ReturnType<typeof setTimeout>|null} */
+let moreMessagesTimer = null;
 
 /** @param {string} key */
 function option(key) {
@@ -276,6 +291,77 @@ function installMediaHook() {
     return true;
 }
 
+// ─── 6. Пузыри там, где DES их не разложил ─────────────────────────────────
+
+/** Пауза сторожа после перерисовки: дольше раскладки DES по событию и его проверки после остановки генерации. */
+const RESTORE_DELAY_MS = Math.max(DES_TIMING.bubblesAfterEvent, DES_TIMING.bubblesStoppedCheck) + 300;
+/** «Show more messages»: картинки NAI Studio и прочее встают в следующих тиках, DES на смене чата ждёт столько же. */
+const MORE_MESSAGES_DELAY_MS = 150;
+
+function bubblesWanted() {
+    return option('restoreBubbles') && Boolean(env?.des) && env.des.bubbles.mode() !== DES_KEYS.bubblesOff;
+}
+
+function startBubbleGuard() {
+    bubbleGuard = new BubbleGuard({
+        enabled: bubblesWanted,
+        state: (element) => env.des.bubbles.state(element),
+        restore: (element) => env.des.bubbles.restoreIfLost(element),
+        // Мысли персонажей и шапку сцены DES держит внутри сообщения: после чужой перерисовки их тоже нет.
+        afterRestore: () => env.des.rerender(),
+        isLast: (element) => Number(element.getAttribute('mesid')) === (getContext().chat?.length ?? 0) - 1,
+        streaming: () => {
+            const processor = getContext().streamingProcessor;
+            return Boolean(processor) && !processor.isFinished;
+        },
+        delayMs: RESTORE_DELAY_MS,
+        onRestored: (element) => {
+            log.debug(`Исправления: пузыри сообщения #${element.getAttribute('mesid')} пропали после перерисовки без события — разложены заново.`);
+            logOnce('restoreBubbles:ok', 'info', 'Исправления: сообщение перерисовали, не сообщив DES, — пузыри разложены заново.');
+        },
+    });
+    watchChat();
+}
+
+/** Ленту сообщений ST не пересоздаёт, только её детей: наблюдателя хватает одного. */
+function watchChat() {
+    if (chatObserver || !bubbleGuard || typeof MutationObserver !== 'function') return;
+    const chat = document.querySelector('#chat');
+    if (!chat) return;
+    chatObserver = new MutationObserver((records) => bubbleGuard?.observe(records));
+    chatObserver.observe(chat, { childList: true, subtree: true });
+}
+
+function stopBubbleGuard() {
+    chatObserver?.disconnect();
+    chatObserver = null;
+    bubbleGuard?.dispose();
+    bubbleGuard = null;
+    if (moreMessagesTimer) clearTimeout(moreMessagesTimer);
+    moreMessagesTimer = null;
+}
+
+/** @param {string} type @param {unknown} _options @param {boolean} dryRun */
+function onGenerationStartedForBubbles(type, _options, dryRun) {
+    // Тихие и пробные генерации в ленту не пишут.
+    if (!dryRun && type !== 'quiet') bubbleGuard?.setGenerating(true);
+}
+
+function onGenerationOverForBubbles() {
+    bubbleGuard?.setGenerating(false);
+}
+
+function onMoreMessagesLoaded() {
+    if (!bubblesWanted()) return;
+    if (moreMessagesTimer) clearTimeout(moreMessagesTimer);
+    moreMessagesTimer = setTimeout(() => {
+        moreMessagesTimer = null;
+        if (bubblesWanted() && env.des.bubbles.applyMissing()) {
+            logOnce('restoreBubbles:more', 'info', 'Исправления: сообщения, подгруженные кнопкой «Show more messages», разложены по пузырям.');
+        }
+    }, MORE_MESSAGES_DELAY_MS);
+}
+
 // ─── Модуль ────────────────────────────────────────────────────────────────
 
 /** @type {import('../core.js').AddonModule} */
@@ -308,7 +394,14 @@ export default {
         subscribe('makeLast', eventTypes.CHAT_CHANGED, () => {
             scheduleTranslationReturn();
             fixTrackerData({ persist: false });
+            watchChat();
         });
+        // Пузыри там, где DES их не разложил: сторож перерисовок и «Show more messages».
+        startBubbleGuard();
+        subscribe('on', eventTypes.GENERATION_STARTED, onGenerationStartedForBubbles);
+        subscribe('on', eventTypes.GENERATION_ENDED, onGenerationOverForBubbles);
+        subscribe('on', eventTypes.GENERATION_STOPPED, onGenerationOverForBubbles);
+        if (eventTypes.MORE_MESSAGES_LOADED) subscribe('on', eventTypes.MORE_MESSAGES_LOADED, onMoreMessagesLoaded);
         try {
             fixTrackerData({ persist: false });
         } catch (error) {
@@ -321,6 +414,7 @@ export default {
         for (const [event, handler] of subscriptions) eventSource.removeListener(event, handler);
         subscriptions = [];
         showHiddenTranslations();
+        stopBubbleGuard();
         mediaActive = false;
         env = null;
         log.info('Модуль 4 (исправления) выключен.');

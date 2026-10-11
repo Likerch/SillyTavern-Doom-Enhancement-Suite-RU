@@ -89,7 +89,9 @@ export const PROMPT_POSITION = Object.freeze({ NONE: -1, IN_PROMPT: 0, IN_CHAT: 
 export const PROMPT_ROLE = Object.freeze({ SYSTEM: 0, USER: 1, ASSISTANT: 2 });
 
 /**
- * Перерисовать сообщение после правки его текста (то же, что ST делает при редактировании).
+ * Перерисовать сообщение после правки его текста. Без события: годится только внутри MESSAGE_RECEIVED — следом ST
+ * пошлёт CHARACTER_MESSAGE_RENDERED, и DES с соседями разложат уже новый текст. Позже нужен ещё MESSAGE_UPDATED,
+ * как после редактора ST, иначе DES оставит сообщение без пузырей.
  * @param {number} messageId
  */
 export function rerenderMessage(messageId) {

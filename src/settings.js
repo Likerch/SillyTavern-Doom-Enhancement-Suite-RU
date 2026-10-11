@@ -23,7 +23,7 @@ export const DEFAULT_SETTINGS = {
         },
         // userWeatherWords: свой словарь погоды { тип: [слова] }; null — встроенный
         serviceValues: { enabled: true, weatherWords: true, weatherPrompt: true, timePrompt: true, userWeatherWords: null },
-        fixes: { enabled: true, fieldKeys: true, offScene: true, noQuest: true, keepTranslations: true, bubbleImages: true },
+        fixes: { enabled: true, fieldKeys: true, offScene: true, noQuest: true, keepTranslations: true, bubbleImages: true, restoreBubbles: true },
         bunnymo: { enabled: true, languageLock: true, detectors: true, antiClanker: true, archetypes: true, archiveKeys: true, normalizer: true, packTags: true },
         // ragFormsAdded: { id коллекции RAG CK: формы имени, которые модуль дописал в её триггеры }
         carrotKernel: {

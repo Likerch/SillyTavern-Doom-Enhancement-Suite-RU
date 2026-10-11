@@ -112,6 +112,22 @@
 
 *В надстройке:* модуль 4, «Картинки в пузырях чата» — невидимая метка после картинок в отрисованном HTML.
 
+## 11. A silent re-render leaves a message without bubbles for good
+
+> `applyChatBubbles` returns early when `.mes_text` already carries `data-dooms-bubbles-style` (`src/systems/rendering/chatBubbles.js:1131-1132`), and only the event handlers clear that mark (`clearBubbleState`, `:79`; `index.js:3170`, `:3313`, `:3374`). The mark lives on the `.mes_text` element itself, which SillyTavern keeps when it re-renders a message: `updateMessageBlock()` and code like `mesText.innerHTML = messageFormatting(…)` replace only its children. So when an extension changes a message after the bubbles were laid out and re-renders it without emitting `MESSAGE_UPDATED` (an image inserted into a finished reply, a cleaned reply, a tag block appended on `CHARACTER_MESSAGE_RENDERED`), the message shows plain text with the mark still set, and DES never touches it again — the user has to open and close the message editor. Inline thoughts inside `.mes_text` are lost the same way. The `GENERATION_STOPPED` safety net (`index.js:3419`) doesn't help: it checks the same attribute.
+>
+> Suggested fix: decide by the content, not only by the attribute — e.g. treat a message as processed only while `.mes_text` still contains `.dooms-bubbles` (or keep the "applied" mark on the generated wrapper instead of `.mes_text`), and/or watch `#chat` with a `MutationObserver` for `.mes_text` children replaced while the mark is set.
+
+*В надстройке:* модуль 4, «Пузыри без похода в редактор» — сторож перерисовок раскладывает такие сообщения заново.
+
+## 12. Messages loaded with "Show more messages" never get bubbles
+
+> SillyTavern's `showMoreMessages()` inserts the older messages and emits only `MORE_MESSAGES_LOADED` — no per-message render events. DES subscribes to it only for the fullsheet buttons and tracker dropdowns (`onMoreMessagesLoadedFullsheet`, `index.js:3410`, `:3454`); bubbles are laid out on `CHAT_CHANGED` (`applyAllChatBubbles`, `index.js:3299`) and per-message events. In a chat longer than `chat_truncation`, every message loaded with the button stays without bubbles until it is edited.
+>
+> Suggested fix: call `applyAllChatBubbles()` (it skips messages that are already processed and lazily handles the off-screen ones) from the `MORE_MESSAGES_LOADED` handler as well.
+
+*В надстройке:* модуль 4, «Пузыри без похода в редактор» — на `MORE_MESSAGES_LOADED` раскладывает подгруженные сообщения.
+
 ---
 
 # CarrotKernel и BunnyMo
