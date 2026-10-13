@@ -1,19 +1,32 @@
-// Программный интерфейс для Maestro: `globalThis.DESRU_API`.
+// Программный интерфейс для Maestro и Officina: `globalThis.DESRU_API`.
 //
 // Maestro — расширение-«дирижёр» над всем набором (DES, BunnyMo, CK, …). Через этот объект он берёт у надстройки
 // склонения имён и алиасы DES и согласует, кто из двоих выполняет пересекающиеся функции: пока Maestro объявил
 // функцию своей, надстройка её пропускает. Ничего не сохраняется — Maestro объявляет свои функции при каждом
 // запуске; по умолчанию все функции у надстройки, и её поведение не меняется.
 //
+// Officina (мастерская авторов) через него публикует пресет трекера DES для карточки и привязывает его к карточке
+// по аватару (0.9.0, `features`: 'trackerPresets', 'trackerBindingByAvatar').
+//
 // Объект версионный (`version`): поля только добавляются, смысл существующих не меняется. Несовместимое
-// изменение — новая версия.
+// изменение — новая версия. Что добавилось внутри версии, перечислено в `features`.
 
+import { getContext } from './st.js';
 import { log } from './log.js';
+import { desCharEntityKey } from './des-adapter.js';
 import { normalizeRussianName, wordForms } from './lib/russian-names.js';
 import { nameFormsKey as buildNameFormsKey } from './lib/regex-keys.js';
+import { validateTrackerConfig } from './lib/tracker-config.js';
 
 export const API_VERSION = 1;
 export const API_GLOBAL = 'DESRU_API';
+
+/** Что добавилось в версии 1 после 0.8.0: по этим строкам соседи проверяют, есть ли нужные поля. */
+export const API_FEATURES = Object.freeze(['trackerPresets', 'trackerBindingByAvatar']);
+
+/** id пресета, который можно задать самому: как у DES (`preset_…`) или свой, без пробелов и разметки. */
+const PRESET_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
+const MAX_PRESET_NAME = 200;
 
 /**
  * Функции, которые Maestro может взять на себя:
@@ -158,11 +171,123 @@ export function nameFormsKey(name) {
     return buildNameFormsKey(String(name ?? ''), (word) => wordForms(word, { genitive: true }));
 }
 
+// ─── Пресеты трекера DES и привязка по аватару (Officina) ─────────────────
+
+/**
+ * @typedef {{ ok: true }|{ ok: false, error: string, errors?: string[] }} ApiResult
+ * Коды ошибок: `unavailable` — DES или его пресеты недоступны (гард, модуль 4 выключен вместе с DES); `off` —
+ * выключен переключатель «Пресет трекера — у своей карточки» (модуль 4); `editor-open` — открыт редактор трекера
+ * DES, он сохранит своё поверх; `invalid` — в `errors` что не так; `not-found` — нет такого пресета; `last` —
+ * последний пресет DES не удаляет; `no-card` — карточки с таким аватаром нет в списке ST.
+ */
+
+/**
+ * @param {() => import('./des-adapter.js').DesApi|null} des
+ * @param {() => import('./preset-bindings.js').PresetBindings|null} bindings
+ */
+function createTrackerApi(des, bindings) {
+    const presets = () => {
+        try {
+            const facet = des()?.presets;
+            return facet?.available() ? facet : null;
+        } catch (error) {
+            log.warn('API: пресеты трекера DES не прочитались', error);
+            return null;
+        }
+    };
+    /** @param {string[]} errors */
+    const invalid = (errors) => ({ ok: /** @type {false} */ (false), error: 'invalid', errors });
+
+    const trackerPresets = Object.freeze({
+        /** @returns {{ id: string, name: string }[]} */
+        list: () => presets()?.list() ?? [],
+        /** @param {string} id @returns {{ id: string, name: string, trackerConfig: any }|null} копия */
+        get: (id) => (typeof id === 'string' ? presets()?.get(id) ?? null : null),
+        /** Проверить trackerConfig, ничего не записывая. @param {unknown} trackerConfig @returns {string[]} ошибки */
+        validate: (trackerConfig) => validateTrackerConfig(trackerConfig).errors,
+        /**
+         * Создать пресет (без `id` или с новым) или заменить существующий. Ничего не пишет, если что-то не так.
+         * @param {{ id?: string|null, name: string, trackerConfig: unknown }} input
+         * @returns {{ ok: true, id: string }|{ ok: false, error: string, errors?: string[] }}
+         */
+        save(input) {
+            const facet = presets();
+            if (!facet) return { ok: false, error: 'unavailable' };
+            if (!input || typeof input !== 'object' || Array.isArray(input)) return invalid(['нужен объект { id?, name, trackerConfig }']);
+            /** @type {string[]} */
+            const errors = [];
+            const id = input.id ?? null;
+            if (id !== null && (typeof id !== 'string' || !PRESET_ID.test(id))) errors.push('id: латиница, цифры и _ . : - (до 128 знаков) или без id — тогда новый');
+            const name = typeof input.name === 'string' ? input.name.trim() : '';
+            if (!name) errors.push('name: нужно непустое название пресета');
+            else if (name.length > MAX_PRESET_NAME) errors.push(`name: не длиннее ${MAX_PRESET_NAME} знаков`);
+            const checked = validateTrackerConfig(input.trackerConfig);
+            errors.push(...checked.errors.map((error) => (error.startsWith('trackerConfig') ? error : `trackerConfig.${error}`)));
+            if (errors.length) return invalid(errors);
+            if (facet.editorOpen()) return { ok: false, error: 'editor-open' };
+            const savedId = facet.write({ id, name, trackerConfig: checked.config });
+            if (!savedId) return { ok: false, error: 'unavailable' };
+            log.info(`API: пресет трекера «${name}» (${savedId}) записан в DES.`);
+            return { ok: true, id: savedId };
+        },
+        /**
+         * Удалить пресет вместе с его привязками (штатно в DES; был активным — DES загрузит первый оставшийся).
+         * @param {string} id
+         * @returns {ApiResult}
+         */
+        remove(id) {
+            const facet = presets();
+            if (!facet) return { ok: false, error: 'unavailable' };
+            if (typeof id !== 'string' || !facet.has(id)) return { ok: false, error: 'not-found' };
+            if (facet.editorOpen()) return { ok: false, error: 'editor-open' };
+            if (!facet.remove(id)) return { ok: false, error: 'last' };
+            bindings()?.sync({ reason: 'пресет удалён через API' });
+            log.info(`API: пресет трекера ${id} удалён из DES.`);
+            return { ok: true };
+        },
+    });
+
+    const trackerBinding = Object.freeze({
+        /** Работает ли привязка по аватару (переключатель модуля 4 и пресеты DES на месте). */
+        active: () => Boolean(bindings()),
+        /**
+         * Пресет карточки. Пока привязка по аватару работает — из её карты; выключена — что DES сейчас выберет для
+         * карточки по её номеру.
+         * @param {string} avatar
+         * @returns {string|null}
+         */
+        get(avatar) {
+            if (typeof avatar !== 'string' || !avatar) return null;
+            const running = bindings();
+            if (running) return running.get(avatar);
+            const facet = presets();
+            const characters = getContext().characters;
+            const index = Array.isArray(characters) ? characters.findIndex((character) => character?.avatar === avatar) : -1;
+            const presetId = index >= 0 ? facet?.associations()?.[desCharEntityKey(index)] : null;
+            return typeof presetId === 'string' && facet?.has(presetId) ? presetId : null;
+        },
+        /**
+         * Привязать пресет к карточке (`null` — снять привязку). У открытой карточки DES сразу выбирает пресет заново.
+         * @param {string} avatar
+         * @param {string|null} presetId
+         * @returns {ApiResult}
+         */
+        set(avatar, presetId) {
+            const running = bindings();
+            if (!running) return { ok: false, error: presets() ? 'off' : 'unavailable' };
+            return running.set(avatar, presetId);
+        },
+    });
+
+    return { trackerPresets, trackerBinding };
+}
+
 // ─── Объект API ────────────────────────────────────────────────────────────
 
 /**
  * @typedef {object} DesRuApi
  * @property {number} version
+ * @property {readonly string[]} features что добавилось в версии 1 (API_FEATURES)
  * @property {(name: string) => string[]} nameForms
  * @property {(name: string) => string|null} nameFormsKey
  * @property {() => Record<string, string[]>} aliases алиасы DES: имя карточки → алиасы (копия)
@@ -170,15 +295,20 @@ export function nameFormsKey(name) {
  * @property {() => string[]} functions
  * @property {(ids: string[]) => void} setMaestroOwned
  * @property {() => string[]} maestroOwned
+ * @property {ReturnType<typeof createTrackerApi>['trackerPresets']} trackerPresets пресеты трекера DES
+ * @property {ReturnType<typeof createTrackerApi>['trackerBinding']} trackerBinding привязка пресета к карточке по аватару
  */
 
 /**
- * @param {{ des: () => import('./des-adapter.js').DesApi|null }} deps живой DES, пока гард разрешает работу с данными
+ * @param {{ des: () => import('./des-adapter.js').DesApi|null, bindings?: () => import('./preset-bindings.js').PresetBindings|null }} deps
+ *        живой DES, пока гард разрешает работу с данными; работающая привязка по аватару
  * @returns {Readonly<DesRuApi>}
  */
-export function createApi({ des }) {
+export function createApi({ des, bindings = () => null }) {
+    const { trackerPresets, trackerBinding } = createTrackerApi(des, bindings);
     return Object.freeze({
         version: API_VERSION,
+        features: API_FEATURES,
         nameForms,
         nameFormsKey,
         aliases() {
@@ -199,6 +329,8 @@ export function createApi({ des }) {
         functions: () => [...MAESTRO_FUNCTIONS],
         setMaestroOwned,
         maestroOwned,
+        trackerPresets,
+        trackerBinding,
     });
 }
 

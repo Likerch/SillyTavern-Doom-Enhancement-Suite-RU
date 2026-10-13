@@ -14,10 +14,13 @@
  * 6. Пузыри там, где DES их не разложил: сообщение перерисовали без события ST (DES считает пузыри на месте,
  *    а их уже нет) или подгрузили кнопкой «Show more messages» (DES её не слушает). Сторож (src/lib/bubble-guard.js)
  *    раскладывает такие сообщения заново — без похода в редактор сообщения.
+ * 7. Пресет трекера — у своей карточки: DES привязывает пресет к номеру карточки, а номера сдвигаются. Привязка
+ *    хранится по аватару и номера в DES возвращаются на место (src/preset-bindings.js).
  */
 import { getContext } from '../st.js';
 import { log } from '../log.js';
-import { getSettings } from '../settings.js';
+import { getSettings, saveSettings } from '../settings.js';
+import { presetBindings, startPresetBindings, stopPresetBindings } from '../preset-bindings.js';
 import {
     DES_KEYS, DES_MODE_NAMES, DES_TIMING, DES_VALUES, desDetailKey, desSceneFieldKey, hasDesOffSceneMarker, importDesModuleEarly,
 } from '../des-adapter.js';
@@ -60,6 +63,11 @@ const OPTIONS = [
         key: 'restoreBubbles',
         title: 'Пузыри без похода в редактор',
         description: 'DES раскладывает сообщение по пузырям, только когда ST сообщает, что нарисовал его. Если текст перерисовало другое расширение и не сообщило, DES считает пузыри на месте, а их уже нет, — сообщение остаётся без карточек, пока не откроешь и не закроешь редактор. Сообщения, подгруженные кнопкой «Show more messages», DES не раскладывает совсем. Раскладываем такие сообщения сами. Текст сообщений не меняется.',
+    },
+    {
+        key: 'trackerBindings',
+        title: 'Пресет трекера — у своей карточки',
+        description: 'DES привязывает пресет трекера к карточке по её номеру в списке SillyTavern. Номер меняется, когда карточки добавляют или удаляют, — и пресет молча уходит к другой карточке. Запоминаем привязку по файлу карточки (аватару) и возвращаем номера в DES на место. Привязки групп DES и так не теряет.',
     },
 ];
 
@@ -362,6 +370,21 @@ function onMoreMessagesLoaded() {
     }, MORE_MESSAGES_DELAY_MS);
 }
 
+// ─── 7. Пресет трекера — у своей карточки ─────────────────────────────────
+
+function startTrackerBindings() {
+    if (!option('trackerBindings') || presetBindings()) return;
+    if (!env?.des?.presets?.available()) {
+        logOnce('trackerBindings:none', 'warn', 'Исправления: пресеты трекера DES недоступны (нет нужных экспортов persistence.js) — привязка по аватару не работает.');
+        return;
+    }
+    startPresetBindings({
+        des: () => env?.des ?? null,
+        store: () => getSettings().modules.fixes.presetBindings,
+        saveOwn: saveSettings,
+    });
+}
+
 // ─── Модуль ────────────────────────────────────────────────────────────────
 
 /** @type {import('../core.js').AddonModule} */
@@ -369,7 +392,7 @@ export default {
     id: 'fixes',
     number: 4,
     title: 'Исправления DES для русского',
-    description: 'Обходит места, где DES ломается на русском, и его ошибку с картинками в пузырях чата. Каждое исправление включается отдельно.',
+    description: 'Обходит места, где DES ломается на русском, его ошибки с пузырями чата и с привязкой пресетов трекера к карточкам. Каждое исправление включается отдельно.',
     needs: { ui: true, data: true },
     options: OPTIONS,
     /** Хук картинок — до первой отрисовки чата: ST открывает последний чат раньше, чем гард пустит модуль. */
@@ -407,6 +430,8 @@ export default {
         } catch (error) {
             log.warn('Исправления: не удалось поправить уже загруженный трекер', error);
         }
+        // Пресеты трекера по аватару: сверка сразу (чат мог открыться раньше модуля) и на событиях ST и DES.
+        startTrackerBindings();
         log.info('Модуль 4 (исправления) включён.');
     },
     disable() {
@@ -415,9 +440,16 @@ export default {
         subscriptions = [];
         showHiddenTranslations();
         stopBubbleGuard();
+        stopPresetBindings();
         mediaActive = false;
         env = null;
         log.info('Модуль 4 (исправления) выключен.');
+    },
+    /** @param {string} key @param {boolean} enabled */
+    onOptionChange(key, enabled) {
+        if (key !== 'trackerBindings') return;
+        if (enabled) startTrackerBindings();
+        else stopPresetBindings();
     },
     /** Замечания для панели: что исправляется и что снаружи не исправить. */
     notes() {
@@ -436,6 +468,11 @@ export default {
         const sceneFields = env.des.sceneFields().map((field) => String(field.name)).filter((name) => desSceneFieldKey(name) === '');
         if (sceneFields.length) {
             notes.push({ level: 'warn', text: `Поля сцены ${quoteList(sceneFields)} DES молча выкидывает из-за кириллицы в названии, снаружи это не исправить. Назови их латиницей; русскую подпись можно будет задать в словаре модуля 1.` });
+        }
+        if (option('trackerBindings')) {
+            const bindings = presetBindings();
+            if (!bindings) notes.push({ level: 'warn', text: 'Пресет трекера — у своей карточки: пресеты DES недоступны, привязка по аватару не работает.' });
+            else if (bindings.count()) notes.push({ level: 'info', text: `Пресеты трекера привязаны по аватару у карточек: ${bindings.count()}.` });
         }
         return notes;
     },

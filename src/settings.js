@@ -23,7 +23,12 @@ export const DEFAULT_SETTINGS = {
         },
         // userWeatherWords: свой словарь погоды { тип: [слова] }; null — встроенный
         serviceValues: { enabled: true, weatherWords: true, weatherPrompt: true, timePrompt: true, userWeatherWords: null },
-        fixes: { enabled: true, fieldKeys: true, offScene: true, noQuest: true, keepTranslations: true, bubbleImages: true, restoreBubbles: true },
+        // presetBindings: привязки пресетов трекера DES по аватару (src/preset-bindings.js): byAvatar — аватар → id пресета;
+        // seen — ключи char_<номер> DES, какими надстройка оставила их в прошлый раз: { ключ: { preset, avatar|null } }
+        fixes: {
+            enabled: true, fieldKeys: true, offScene: true, noQuest: true, keepTranslations: true, bubbleImages: true, restoreBubbles: true,
+            trackerBindings: true, presetBindings: { byAvatar: {}, seen: {} },
+        },
         bunnymo: { enabled: true, languageLock: true, detectors: true, antiClanker: true, archetypes: true, archiveKeys: true, normalizer: true, packTags: true },
         // ragFormsAdded: { id коллекции RAG CK: формы имени, которые модуль дописал в её триггеры }
         carrotKernel: {

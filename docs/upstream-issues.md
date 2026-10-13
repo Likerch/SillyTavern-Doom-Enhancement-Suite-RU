@@ -128,6 +128,14 @@
 
 *В надстройке:* модуль 4, «Пузыри без похода в редактор» — на `MORE_MESSAGES_LOADED` раскладывает подгруженные сообщения.
 
+## 13. Tracker presets bound to a character move to another character
+
+> A tracker preset is bound to a character under the key `char_<characterId>` (`getCurrentEntityKey`, `src/core/persistence.js:1137-1145`; `associatePresetWithCurrentEntity`, `:1351`), and `characterId` is SillyTavern's `this_chid` — the character's index in the `characters` array. That index changes whenever a card is imported, created, duplicated or deleted, because `getCharacters()` reloads the whole list from the server in its directory order. DES never moves the keys, so after a new card the binding silently applies to whichever card now has that index (`autoSwitchPresetForEntity`, `:1403`, called on every `CHAT_CHANGED` from `src/systems/integration/sillytavern.js:375`), and a deleted card's binding is inherited by the card that shifts into its place. Group keys (`group_<id>`) are fine.
+>
+> Suggested fix: key the binding by the card's avatar file name (`characters[this_chid].avatar`, stable until the card is renamed — `CHARACTER_RENAMED` gives the old and new name), and migrate the existing `char_<n>` keys once using the current list.
+
+*В надстройке:* модуль 4, «Пресет трекера — у своей карточки» — привязка хранится по аватару, номера в DES возвращаются на место.
+
 ---
 
 # CarrotKernel и BunnyMo

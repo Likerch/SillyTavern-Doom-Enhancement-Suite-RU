@@ -929,3 +929,40 @@ DES использует только обычный `eventSource.on`, без `m
 - **Фоновые генерации.** `GENERATION_STARTED` приходит и на генерации, для которых DES слот трекера не переписывает.
   В слоте остаётся уже поправленный текст, поэтому «наша правка уже стоит» считается успехом. Это касается
   и модуля 3, ложные предупреждения там исправлены.
+
+## 17. 0.9.0: пресеты трекера и их привязки (коммит `10ad241`)
+
+- **Хранилище.** `extensionSettings.presetManager` (`src/core/state.js:422-432`): `presets { id: { id, name,
+  trackerConfig, historyPersistence? } }`, `characterAssociations { ключ: id пресета }`, `activePresetId`,
+  `defaultPresetId`. Пустой `presets` DES при загрузке заполняет пресетом `preset_default` из текущего
+  `trackerConfig` (`migrateToPresetManager`, `persistence.js:1164-1186`). Новый пресет — `preset_<Date.now()>`
+  с копией текущих `trackerConfig` и `historyPersistence` (`createPreset`, `:1239-1253`).
+- **Ключ привязки** — `getCurrentEntityKey` (`persistence.js:1137-1145`): `group_<groupId>` в группе, иначе
+  `char_<characterId>`, где `characterId` — `this_chid`, номер карточки в массиве `characters` ST. ST перечитывает
+  массив целиком (`getCharacters`, `script.js:1294-1336` в ST 1.19.0) после импорта, создания, копирования,
+  удаления и переименования карточки, в порядке файлов на сервере, — номера сдвигаются, а DES ключи не переносит.
+  Удаление карточки привязку не снимает. Ключи групп стабильны.
+- **Когда DES читает привязку.** `onCharacterChanged` на `CHAT_CHANGED` (`sillytavern.js:375`) →
+  `autoSwitchPresetForEntity` (`persistence.js:1403-1425`): есть привязка и пресет — `loadPreset`, пресета нет —
+  привязка снимается, привязки нет — пресет по умолчанию. Ещё раз — в конце инициализации DES, если чат уже открыт
+  (`index.js:3464-3466`). `loadPreset` (`:1273-1304`) копирует `trackerConfig` пресета в живой, дописывает
+  недостающие виджеты, берёт его `historyPersistence` (нет — значения по умолчанию) и сохраняет.
+- **Когда DES пишет привязку.** Только «Save» в редакторе трекера (`applyTrackerConfig`, `trackerEditor.js:290-337`):
+  галочка привязки копится в `tempAssociation` и пишется `associatePresetWithCurrentEntity` /
+  `removePresetAssociationForCurrentEntity` (`persistence.js:1351-1368`), затем `window` получает событие
+  `dooms:tracker-config-saved`. `deletePreset` (`:1322-1347`) снимает все привязки к удаляемому пресету, последний
+  пресет не удаляет, активный заменяет первым оставшимся.
+- **Сохранение** — `saveSettings` (`persistence.js:544-558`): `extension_settings[имя DES] = extensionSettings`
+  и `saveSettingsDebounced` ST. Наши настройки (`extension_settings.desru`) уходят тем же сохранением.
+- **Что DES читает из `trackerConfig`** без проверки: `infoBox.widgets.date.format` (`renderInfoBoxTab`,
+  `trackerEditor.js:668-669`), `presentCharacters.customFields.forEach` (вкладка истории, `:1256`). Ключи своих
+  полей — латиница (`toSnakeCase` / `toFieldKey`, `jsonPromptHelpers.js:15-32`), поле сцены с пустым,
+  встроенным (`RESERVED_INFOBOX_KEYS`, `:114`) или повторным ключом DES молча выбрасывает (`getCustomSceneFields`,
+  `:122-145`). Описания полей персонажа без типа, формат даты, описание мыслей, варианты отношений и названия статов
+  попадают в JSON-шаблон без экранирования (`buildInfoBoxJSONInstruction`, `:168`;
+  `buildRelationshipSpec`, `:102`; `buildCharactersJSONInstruction`, `:257-316`). Предела числа полей присутствующих в DES нет.
+- **Решение.** Модуль 4 «Пресет трекера — у своей карточки»: своя карта «аватар → пресет» и сверка ключей
+  `char_<номер>` с ней (`src/lib/tracker-bindings.js`, правила — в `docs/guide/module-4-fixes.md`) первой на
+  `CHAT_CHANGED`, на `CHARACTER_PAGE_LOADED` (ST шлёт его в конце `getCharacters` → `printCharacters`),
+  `CHARACTER_DELETED`, `CHARACTER_RENAMED`, `CHARACTER_DUPLICATED`, при запуске модуля и сразу после
+  `dooms:tracker-config-saved`. Пресеты и привязки для Officina — `DESRU_API.trackerPresets` / `trackerBinding`.

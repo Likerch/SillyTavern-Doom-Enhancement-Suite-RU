@@ -9,6 +9,7 @@ import { DES_INFO, checkTemplate, inspectDes, onDesToggle, onTemplateInserted } 
 import { evaluateGuard } from './guard.js';
 import { mountPanel } from './panel.js';
 import { installApi } from './maestro-api.js';
+import { presetBindings } from './preset-bindings.js';
 import localization from './modules/localization.js';
 import names from './modules/names.js';
 import serviceValues from './modules/service-values.js';
@@ -80,9 +81,10 @@ let recheckTimer = 0;
 let recheckRun = 0;
 
 export async function start() {
-    // API для Maestro — сразу: склонения работают и без DES, а алиасы появятся, когда гард разрешит работу с данными.
+    // API для Maestro и Officina — сразу: склонения работают и без DES, а алиасы и пресеты трекера появятся, когда гард
+    // разрешит работу с данными; привязка по аватару — пока работает модуль 4 с её переключателем.
     try {
-        installApi({ des: () => (state.verdict?.data ? state.des : null) });
+        installApi({ des: () => (state.verdict?.data ? state.des : null), bindings: presetBindings });
     } catch (error) {
         log.error('API для Maestro не установился', error);
     }

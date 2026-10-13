@@ -116,6 +116,8 @@ test('DES modules require only the exports the adapter uses', () => {
     assert.deepEqual(Object.keys(DES_MODULES.portraitBar.exports), ['updatePortraitBar']);
     assert.deepEqual(Object.keys(DES_MODULES.fullsheet.exports), ['messageHasFullSheet']);
     assert.deepEqual(Object.keys(DES_MODULES.fullsheet.optionalExports), ['injectFullSheetButtonForMessage']);
+    assert.deepEqual(Object.keys(DES_MODULES.presets.exports), ['loadPreset', 'deletePreset', 'autoSwitchPresetForEntity']);
+    assert.equal(DES_MODULES.presets.optional, true, 'without tracker presets only the binding by avatar and the preset API stop');
 });
 
 test('campaign names are data, the Unfiled label is chrome', () => {

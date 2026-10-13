@@ -28,6 +28,11 @@ export const DES_SELECTORS = Object.freeze({
     templateMarker: '#rpg-settings-popup',
     /** Workshop открыт: черновик держит снимок алиасов и при сохранении пишет массив целиком (characterWorkshop.js). */
     workshopOpen: '#character-workshop-popup.is-open',
+    /**
+     * Редактор трекера открыт: он держит копию trackerConfig и отложенную привязку к карточке, при «Save» пишет их в
+     * активный пресет, при «Cancel» возвращает копию поверх живой настройки (trackerEditor.js).
+     */
+    trackerEditorOpen: '#rpg-tracker-editor-popup.is-open',
     /** Кнопка импорта листа BunnyMo в ряду кнопок сообщения (fullsheetButtons.js). */
     importButton: '.dooms-import-fullsheet-btn',
     /** Разметка пузырей внутри .mes_text и атрибут «пузыри уже разложены» на нём (chatBubbles.js). */
@@ -234,6 +239,13 @@ export const DES_MODULES = Object.freeze({
         optionalExports: { injectFullSheetButtonForMessage: 'function' },
         optional: true,
     },
+    // Пресеты трекера (presetManager): загрузка пресета с миграцией виджетов, удаление вместе с привязками, выбор
+    // пресета по привязке текущей карточки. Без них нет привязки по аватару и пресетов в API.
+    presets: {
+        path: 'src/core/persistence.js',
+        exports: { loadPreset: 'function', deletePreset: 'function', autoSwitchPresetForEntity: 'function' },
+        optional: true,
+    },
 });
 
 /** Режимы генерации трекера DES (settings.generationMode) — подписи, как их переводит модуль 1 (locales/ru.json). */
@@ -252,6 +264,84 @@ export const DES_KEYS = Object.freeze({
     characterSheets: 'characterSheets',
     /** Пузыри чата выключены (settings.chatBubbleMode). */
     bubblesOff: 'off',
+    /**
+     * Событие window после «Save» в редакторе трекера — сразу после записи привязки к карточке (applyTrackerConfig
+     * в trackerEditor.js). Карточка в этот момент та же, для которой DES записал ключ.
+     */
+    trackerConfigSavedEvent: 'dooms:tracker-config-saved',
+});
+
+/**
+ * Пресеты трекера DES 2.6.0 (settings.presetManager, persistence.js): `presets { id: { id, name, trackerConfig,
+ * historyPersistence? } }`, `characterAssociations { ключ: id пресета }`, `activePresetId`, `defaultPresetId`.
+ * Ключ привязки — `char_<номер>` (номер карточки в массиве characters ST, this_chid) или `group_<id>` (getCurrentEntityKey).
+ * Номер меняется, когда карточки добавляют, удаляют или ST перечитывает список, а DES ключи не переносит.
+ */
+export const DES_PRESETS = Object.freeze({
+    charKeyPrefix: 'char_',
+    groupKeyPrefix: 'group_',
+});
+
+/**
+ * Ключ привязки пресета к карточке с этим номером.
+ * @param {number} index
+ */
+export function desCharEntityKey(index) {
+    return `${DES_PRESETS.charKeyPrefix}${index}`;
+}
+
+/**
+ * Номер карточки в ключе привязки; `null` — ключ не карточки (группа или чужой).
+ * @param {unknown} key
+ * @returns {number|null}
+ */
+export function desCharEntityIndex(key) {
+    const match = /^char_(\d+)$/.exec(String(key ?? ''));
+    return match ? Number(match[1]) : null;
+}
+
+/**
+ * Записать пресет в presetManager DES так, как это сделал бы он сам: без id — новый `preset_<время>` (как createPreset;
+ * занят — с суффиксом), и, как у createPreset, с копией текущих настроек «истории» (`historyPersistence`) — иначе
+ * loadPreset сбросит их у пользователя на значения по умолчанию. Заменяемый пресет сохраняет свои поля, кроме имени
+ * и trackerConfig. Ни загрузки, ни сохранения: это делает вызывающий.
+ * @param {{ presets: Record<string, any> }} manager presetManager DES (меняется на месте)
+ * @param {{ id?: string|null, name: string, trackerConfig: unknown }} preset
+ * @param {unknown} history historyPersistence DES
+ * @param {number} [now]
+ * @returns {string} id пресета
+ */
+export function putDesPreset(manager, { id, name, trackerConfig }, history, now = Date.now()) {
+    let presetId = id || `preset_${now}`;
+    if (!id) {
+        for (let n = 1; manager.presets[presetId]; n += 1) presetId = `preset_${now}_${n}`;
+    }
+    const existing = manager.presets[presetId];
+    const keep = existing && typeof existing === 'object' && !Array.isArray(existing)
+        ? existing
+        : { historyPersistence: history && typeof history === 'object' ? JSON.parse(JSON.stringify(history)) : null };
+    manager.presets[presetId] = { ...keep, id: presetId, name, trackerConfig: JSON.parse(JSON.stringify(trackerConfig)) };
+    return presetId;
+}
+
+/**
+ * Что DES 2.6.0 читает из trackerConfig пресета (state.js, persistence.js loadPreset, trackerEditor.js,
+ * jsonPromptHelpers.js) — по этому проверяется пресет, который пишут через API.
+ */
+export const DES_TRACKER = Object.freeze({
+    /** Виджеты сцены (infoBox.widgets). `date` редактор трекера читает без проверки (`widgets.date.format`). */
+    widgets: Object.freeze(['date', 'weather', 'temperature', 'time', 'location', 'recentEvents', 'moonPhase', 'tension', 'timeSinceRest', 'conditions', 'terrain']),
+    requiredWidgets: Object.freeze(['date']),
+    temperatureUnits: Object.freeze(['C', 'F']),
+    /** Встроенные ключи сцены: своё поле с таким ключом DES молча выкидывает (RESERVED_INFOBOX_KEYS). */
+    reservedSceneKeys: Object.freeze(['date', 'time', 'location', 'weather', 'temperature', 'recentEvents', 'moonPhase', 'tension', 'timeSinceRest', 'conditions', 'terrain', 'doomTension']),
+    /** Типы своих полей (FIELD_TYPES); без типа — 'text'. */
+    fieldTypes: Object.freeze(['text', 'number', 'enum', 'list', 'boolean', 'progress']),
+    /**
+     * Предел полей присутствующих (presentCharacters.customFields). В самом DES предела нет: каждое поле — строка
+     * `details` у каждого персонажа в шаблоне и в ответе. 8 — договорённость с Officina (её план, §6.6 и §10).
+     */
+    maxCharacterFields: 8,
 });
 
 /** Слоты extension-промптов ST, которые пишет DES. */
@@ -788,7 +878,7 @@ function namesFromThoughts(thoughts) {
  * @param {Record<string, any>} namespaces
  */
 function createApi(located, namespaces) {
-    const { state, persistence, aliases, weather, portraitBar, thoughts, sceneHeaders, parser, roster, bubbles, fullsheet } = namespaces;
+    const { state, persistence, aliases, weather, portraitBar, thoughts, sceneHeaders, parser, roster, bubbles, fullsheet, presets: presetFns } = namespaces;
     // `extensionSettings`, `lastGeneratedData`, `committedTrackerData` у DES — `export let`, и при загрузке
     // чата он их переприсваивает. Поэтому читаем через пространство имён каждый раз, а не кэшируем.
     const settings = () => state.extensionSettings ?? {};
@@ -801,6 +891,13 @@ function createApi(located, namespaces) {
         } catch (error) {
             log.warn(`DES: не удалось выполнить ${label}`, error);
         }
+    };
+    /** @param {unknown} value */
+    const isDict = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+    /** presetManager DES, если он в порядке. */
+    const presetManager = () => {
+        const manager = settings().presetManager;
+        return isDict(manager) && isDict(manager.presets) ? manager : null;
     };
 
     return Object.freeze({
@@ -1088,6 +1185,71 @@ function createApi(located, namespaces) {
                 const result = moveDesSheet(store, from, to, options);
                 if (result) attempt('сохранение чата', () => persistence.saveChatData());
                 return result;
+            },
+        }),
+
+        /** Пресеты трекера (presetManager настроек DES) и их привязки к карточкам и группам. */
+        presets: Object.freeze({
+            available: () => Boolean(presetFns) && Boolean(presetManager()),
+            /** Живой объект привязок { char_<номер>|group_<id>: id пресета } или `null`. */
+            associations() {
+                const manager = presetManager();
+                if (!manager) return null;
+                if (!isDict(manager.characterAssociations)) manager.characterAssociations = {};
+                return manager.characterAssociations;
+            },
+            /** @returns {{ id: string, name: string }[]} в порядке DES (как в его списке пресетов) */
+            list() {
+                return Object.entries(presetManager()?.presets ?? {})
+                    .filter(([, preset]) => isDict(preset))
+                    .map(([id, preset]) => ({ id, name: String(preset.name ?? id) }));
+            },
+            /** @param {string} id */
+            has: (id) => isDict(presetManager()?.presets?.[id]),
+            /** @param {string} id @returns {{ id: string, name: string, trackerConfig: any }|null} копия */
+            get(id) {
+                const preset = presetManager()?.presets?.[id];
+                if (!isDict(preset)) return null;
+                return { id, name: String(preset.name ?? id), trackerConfig: JSON.parse(JSON.stringify(preset.trackerConfig ?? null)) };
+            },
+            activeId: () => presetManager()?.activePresetId ?? null,
+            /**
+             * Создать или заменить пресет. Новый получает id в стиле DES и, как у createPreset DES, текущие настройки
+             * «истории» (historyPersistence); у заменяемого они остаются. Активный пресет DES тут же загружает заново
+             * (loadPreset: живая настройка трекера = пресет), остальные просто сохраняются.
+             * @param {{ id?: string|null, name: string, trackerConfig: any }} preset trackerConfig уже проверен
+             * @returns {string|null} id пресета; `null` — presetManager недоступен
+             */
+            write({ id, name, trackerConfig }) {
+                const manager = presetManager();
+                if (!manager) return null;
+                const presetId = putDesPreset(manager, { id, name, trackerConfig }, settings().historyPersistence);
+                if (manager.activePresetId === presetId) attempt('загрузку пресета трекера', () => presetFns.loadPreset(presetId));
+                else attempt('сохранение настроек', () => persistence.saveSettings());
+                return presetId;
+            },
+            /**
+             * Удалить пресет штатной функцией DES: вместе с его привязками; если он был активным, DES загрузит первый
+             * оставшийся. Последний пресет DES не удаляет. @returns {boolean} удалён ли
+             * @param {string} id
+             */
+            remove(id) {
+                try {
+                    return presetFns.deletePreset(id) === true;
+                } catch (error) {
+                    log.warn(`DES: не удалось удалить пресет трекера ${id}`, error);
+                    return false;
+                }
+            },
+            /** Выбрать пресет для текущей карточки или группы по привязке (или пресет по умолчанию) — как DES при смене чата. */
+            applyForCurrent() {
+                attempt('выбор пресета трекера', () => presetFns.autoSwitchPresetForEntity());
+            },
+            /** Открыт ли редактор трекера: пока открыт, пресеты и привязки не пишем — он сохранит своё поверх. */
+            editorOpen: () => Boolean(document.querySelector(DES_SELECTORS.trackerEditorOpen)),
+            /** Сохранить настройки DES (пресеты и привязки живут там) его же функцией. */
+            save() {
+                attempt('сохранение настроек', () => persistence.saveSettings());
             },
         }),
 

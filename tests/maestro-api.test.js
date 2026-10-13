@@ -126,6 +126,19 @@ test('install sets a frozen globalThis.DESRU_API; uninstall removes it and gives
     assert.equal(calls, 0, 'listeners are dropped with the API');
 });
 
+test('0.9.0 only adds members: version 1, features, tracker presets and binding; the 0.8.0 members stay', () => {
+    const api = createApi({ des: () => null });
+    assert.equal(api.version, 1);
+    assert.deepEqual(api.features, ['trackerPresets', 'trackerBindingByAvatar']);
+    for (const name of ['nameForms', 'nameFormsKey', 'aliases', 'onNamesChanged', 'functions', 'setMaestroOwned', 'maestroOwned']) {
+        assert.equal(typeof api[name], 'function', name);
+    }
+    assert.deepEqual(Object.keys(api.trackerPresets), ['list', 'get', 'validate', 'save', 'remove']);
+    assert.deepEqual(Object.keys(api.trackerBinding), ['active', 'get', 'set']);
+    assert.deepEqual(api.trackerPresets.list(), [], 'without DES: empty, no throw');
+    assert.equal(api.trackerBinding.active(), false);
+});
+
 test('bunnymo.structuralPatches: recursion flags are skipped, Russian keys and text stay', () => {
     const lists = [[
         { uid: 46, world: 'BM', comment: '🔮 AUTO-TRIGGER: Jealousy Detection System', key: ['jealous'], excludeRecursion: false, content: 'x' },
